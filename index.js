@@ -6,25 +6,35 @@ const path = require("path");
 const xlsx = require("xlsx");
 const dotenv = require("dotenv");
 
+// Создаем Express приложение
 const app = express();
 app.use(express.json());
 
-// Load environment variables
-dotenv.config({ path: path.join(__dirname, ".env") });
+// Загрузка переменных окружения
+dotenv.config();
 
 const { TELEGRAM_BOT_TOKEN, ADMIN_ID, VERCEL_APP_URL } = process.env;
 const adminIds = ADMIN_ID.split(",").map((id) => parseInt(id.trim()));
-const outputDir = "output";
-const logDir = "logs";
-const webhookUrl = `${VERCEL_APP_URL}/webhook`;
+const webhookUrl = `${VERCEL_APP_URL}/api/webhook`;
 
+// Инициализация бота в режиме webhook (без polling)
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
+
+// Временные пути для хранения данных (в Vercel это будет работать только в рамках запроса)
+const outputDir = "/tmp/output";
+const logDir = "/tmp/logs";
 const logFilePath = path.join(logDir, "wb_parser.log");
 
-// Ensure directories exist
-[outputDir, logDir].forEach((dir) =>
-  fs.mkdir(dir, { recursive: true }).catch(console.error)
-);
+// Создаем временные директории при необходимости
+async function ensureDirsExist() {
+  for (const dir of [outputDir, logDir]) {
+    try {
+      await fs.mkdir(dir, { recursive: true });
+    } catch (error) {
+      console.error(`Failed to create directory ${dir}: ${error.message}`);
+    }
+  }
+}
 
 // Services
 class LogService {
@@ -35,7 +45,11 @@ class LogService {
   async log(message, level = "info") {
     const timestamp = new Date().toISOString();
     const logEntry = `${timestamp} - ${level.toUpperCase()} - ${message}\n`;
-    await fs.appendFile(logFilePath, logEntry, "utf-8");
+    try {
+      await fs.appendFile(logFilePath, logEntry, "utf-8");
+    } catch (error) {
+      console.error(`Failed to write to log file: ${error.message}`);
+    }
     console.log(logEntry.trim());
   }
 
@@ -91,6 +105,10 @@ class FileService {
     const workbook = xlsx.utils.book_new();
     xlsx.utils.book_append_sheet(workbook, worksheet, "data");
     const filePath = path.join(outputDir, `${filename}.xlsx`);
+    
+    // Ensure directory exists before writing
+    await ensureDirsExist();
+    
     await fs.writeFile(
       filePath,
       xlsx.write(workbook, { type: "buffer", bookType: "xlsx" })
@@ -100,42 +118,29 @@ class FileService {
   }
 
   async sendExcelToUser(filePath, filename, userId) {
-    if (
-      !(await fs
-        .access(filePath)
-        .then(() => true)
-        .catch(() => false))
-    ) {
-      await this.bot.sendMessage(
-        userId,
-        `❌ Файл отчета ${filePath} не найден!`,
-        { parse_mode: "Markdown" }
-      );
-      await this.logService.log(`Excel file not found: ${filePath}`, "error");
-      return;
-    }
-    const today = new Date().toLocaleDateString("ru-RU");
-    const caption = `📊 *Анализ категории Wildberries* (${today})`;
     try {
+      // Проверяем доступ к файлу
+      await fs.access(filePath);
+      
+      const today = new Date().toLocaleDateString("ru-RU");
+      const caption = `📊 *Анализ категории Wildberries* (${today})`;
+      
       await this.bot.sendDocument(userId, filePath, {
         caption,
         parse_mode: "Markdown",
       });
+      
       await this.logService.log(
         `Excel report sent to user ${userId}: ${filePath}`
       );
-      setTimeout(async () => {
-        try {
-          await fs.unlink(filePath);
-          await this.logService.log(`File deleted: ${filePath}`);
-        } catch (error) {
-          await this.logService.log(
-            `Failed to delete file ${filePath}: ${error.message}`,
-            "error"
-          );
-        }
-      }, 15000);
+      
+      // Очистка временных файлов не требуется в Vercel, т.к. /tmp очищается автоматически
     } catch (error) {
+      await this.bot.sendMessage(
+        userId,
+        `❌ Ошибка при отправке файла: ${error.message}`,
+        { parse_mode: "Markdown" }
+      );
       await this.logService.log(
         `Failed to send Excel to user ${userId}: ${error.message}`,
         "error"
@@ -413,7 +418,7 @@ class WildberriesParser {
       if (error.response?.status === 429) {
         await this.logService.log("Maximum products parsed (429 error).");
         if (this.results.length) {
-          const filename = `${category.name}_analysis_${Date.now()}`;
+          const filename = `${category.name || 'wb'}_analysis_${Date.now()}`;
           const filePath = await this.fileService.saveToExcel(
             this.results,
             filename
@@ -425,7 +430,7 @@ class WildberriesParser {
       }
       await this.logService.log(`Parsing error: ${error.message}`, "error");
       if (this.results.length) {
-        const filename = `${category.name}_analysis_${Date.now()}`;
+        const filename = `${category?.name || 'wb'}_analysis_${Date.now()}`;
         const filePath = await this.fileService.saveToExcel(
           this.results,
           filename
@@ -449,34 +454,11 @@ class BotHandlers {
     this.parser = parser;
     this.logService = logService;
     this.waitingForUrl = {};
-
-    this.registerHandlers();
   }
 
   registerHandlers() {
-    bot.onText(/\/start/, async (msg) => {
-      if (!adminIds.includes(msg.from.id))
-        return await this.handleUnauthorized(msg);
-      await this.start(msg);
-    });
-
-    bot.onText(/\/list/, async (msg) => {
-      if (!adminIds.includes(msg.from.id))
-        return await this.handleUnauthorized(msg);
-      await this.listAdmins(msg);
-    });
-
-    bot.onText(/\/parse/, async (msg) => {
-      if (!adminIds.includes(msg.from.id))
-        return await this.handleUnauthorized(msg);
-      await this.manualParse(msg);
-    });
-
-    bot.on("message", async (msg) => {
-      if (!adminIds.includes(msg.from.id))
-        return await this.handleUnauthorized(msg);
-      await this.handleText(msg);
-    });
+    // Все обработчики сообщений регистрируются на объекте бота
+    // но фактически обрабатываются через webhook
   }
 
   getMainMenu(userId) {
@@ -584,9 +566,36 @@ class BotHandlers {
       parse_mode: "Markdown",
     });
   }
+  
+  // Метод для обработки входящих обновлений
+  async processUpdate(update) {
+    // Проверка на наличие сообщения
+    if (update.message) {
+      const msg = update.message;
+      const text = msg.text;
+      const userId = msg.from.id;
+      
+      // Проверка на авторизацию
+      if (!adminIds.includes(userId)) {
+        return await this.handleUnauthorized(msg);
+      }
+      
+      // Обработка команд
+      if (text === '/start') {
+        await this.start(msg);
+      } else if (text === '/list') {
+        await this.listAdmins(msg);
+      } else if (text === '/parse') {
+        await this.manualParse(msg);
+      } else {
+        // Обработка текстовых сообщений
+        await this.handleText(msg);
+      }
+    }
+  }
 }
 
-// Initialize services and handlers
+// Initialize services
 const logService = new LogService();
 const fileService = new FileService(bot, logService);
 const evirmaClient = new EvirmaClient(fileService);
@@ -597,43 +606,73 @@ const wildberriesParser = new WildberriesParser(
 );
 const botHandlers = new BotHandlers(bot, wildberriesParser, logService);
 
-// Webhook setup
-app.post("/webhook", async (req, res) => {
+// Инициализация директорий при старте
+ensureDirsExist();
+
+// API routes для Vercel
+// Health check эндпоинт
+app.get("/api/health", async (req, res) => {
+  res.status(200).send("Bot is running");
+});
+
+// Webhook эндпоинт
+app.post("/api/webhook", async (req, res) => {
   try {
-    await bot.processUpdate(req.body);
-    res.sendStatus(200);
+    await logService.log("Received webhook update");
+    await botHandlers.processUpdate(req.body);
+    res.status(200).send("OK");
   } catch (error) {
     await logService.log(`Webhook error: ${error.message}`, "error");
-    res.sendStatus(500);
+    res.status(500).send("Internal Server Error");
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-  await logService.log(`Bot starting up on port ${PORT}...`);
-  await logService.log(`TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}`);
-  await logService.log(`Webhook :${webhookUrl}`);
-  await bot.setWebHook(webhookUrl);
-  for (const adminId of adminIds) {
-    try {
-      await bot.sendMessage(
-        adminId,
-        "🤖 *Бот запущен и готов к работе!*\nВаш ID: " +
-          adminId +
-          "\nИспользуйте /start для начала работы.",
-        { parse_mode: "Markdown" }
-      );
-    } catch (error) {
-      await logService.log(
-        `Failed to notify admin ${adminId}: ${error.message}`,
-        "error"
-      );
+// Эндпоинт для установки вебхука
+app.get("/api/setup", async (req, res) => {
+  const secretToken = req.query.token;
+  if (secretToken !== process.env.SETUP_SECRET) {
+    return res.status(403).send("Unauthorized");
+  }
+
+  try {
+    // Удаляем старый вебхук, если он был
+    await bot.deleteWebHook();
+    // Устанавливаем новый вебхук
+    await bot.setWebHook(webhookUrl);
+    
+    // Отправляем уведомление админам
+    for (const adminId of adminIds) {
+      try {
+        await bot.sendMessage(
+          adminId,
+          "🤖 *Бот запущен и готов к работе!*\nВаш ID: " +
+            adminId +
+            "\nИспользуйте /start для начала работы.",
+          { parse_mode: "Markdown" }
+        );
+      } catch (error) {
+        await logService.log(
+          `Failed to notify admin ${adminId}: ${error.message}`,
+          "error"
+        );
+      }
     }
+    
+    res.status(200).send("Webhook setup successful!");
+  } catch (error) {
+    await logService.log(`Setup webhook error: ${error.message}`, "error");
+    res.status(500).send(`Error setting up webhook: ${error.message}`);
   }
 });
 
-process.on("SIGTERM", async () => {
-  await logService.log("Bot shutting down...");
-  await bot.deleteWebhook();
-  process.exit(0);
-});
+// Для локальной разработки
+if (process.env.NODE_ENV === 'development') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, async () => {
+    await logService.log(`Bot starting up on port ${PORT}...`);
+    await logService.log(`Webhook URL: ${webhookUrl}`);
+  });
+}
+
+// Экспортируем приложение для Vercel
+module.exports = app;
