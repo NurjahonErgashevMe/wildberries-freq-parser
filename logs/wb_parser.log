@@ -1,0 +1,71 @@
+2025-05-04T15:20:32.753Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:21:24.500Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:21:24.530Z - INFO - Webhook URL: undefined/webhook
+2025-05-04T15:21:29.682Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:21:29.711Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:21:41.245Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:21:41.263Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:21:55.715Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:21:55.729Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:21:55.774Z - INFO - Webhook undefined/webhook
+2025-05-04T15:21:59.363Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:21:59.374Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:21:59.375Z - INFO - Webhook :undefined/webhook
+2025-05-04T15:28:21.478Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:28:21.491Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:28:21.493Z - INFO - Webhook :1957-82-215-104-101.ngrok-free.app/webhook
+2025-05-04T15:28:42.566Z - WARNING - Category not found. Check the URL.
+2025-05-04T15:28:42.572Z - INFO - Total parsing time: 2.50 seconds
+2025-05-04T15:34:51.097Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:34:51.105Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:34:51.107Z - INFO - Webhook :1957-82-215-104-101.ngrok-free.app/webhook
+2025-05-04T15:35:04.839Z - WARNING - Category not found. Check the URL.
+2025-05-04T15:35:04.848Z - INFO - Total parsing time: 0.38 seconds
+2025-05-04T15:35:43.146Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:35:43.158Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:35:43.160Z - INFO - Webhook :1957-82-215-104-101.ngrok-free.app/webhook
+2025-05-04T15:35:48.292Z - WARNING - Category not found. Check the URL.
+2025-05-04T15:35:48.308Z - INFO - Total parsing time: 1.26 seconds
+2025-05-04T15:36:02.051Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:36:02.058Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:36:02.063Z - INFO - Webhook :1957-82-215-104-101.ngrok-free.app/webhook
+2025-05-04T15:36:09.095Z - WARNING - Category not found. Check the URL.
+2025-05-04T15:36:09.109Z - INFO - Total parsing time: 0.77 seconds
+2025-05-04T15:36:51.876Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:36:51.882Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:36:51.885Z - INFO - Webhook :1957-82-215-104-101.ngrok-free.app/webhook
+2025-05-04T15:37:02.067Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:37:02.078Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:37:02.087Z - INFO - Webhook :1957-82-215-104-101.ngrok-free.app/webhook
+2025-05-04T15:37:21.773Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:37:21.798Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:37:21.807Z - INFO - Webhook :1957-82-215-104-101.ngrok-free.app/webhook
+2025-05-04T15:37:34.648Z - ERROR - Parsing error: catalogData is not defined
+2025-05-04T15:37:34.651Z - INFO - Total parsing time: 0.39 seconds
+2025-05-04T15:37:48.973Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:37:48.979Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:37:48.984Z - INFO - Webhook :1957-82-215-104-101.ngrok-free.app/webhook
+2025-05-04T15:37:53.089Z - WARNING - Category not found. Check the URL.
+2025-05-04T15:37:53.092Z - INFO - Total parsing time: 0.70 seconds
+2025-05-04T15:38:41.140Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:38:41.148Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:38:41.151Z - INFO - Webhook :1957-82-215-104-101.ngrok-free.app/webhook
+2025-05-04T15:38:47.476Z - WARNING - Category not found. Check the URL.
+2025-05-04T15:38:47.506Z - INFO - Total parsing time: 0.57 seconds
+2025-05-04T15:45:33.051Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:45:33.064Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:45:33.067Z - INFO - Webhook :1957-82-215-104-101.ngrok-free.app/webhook
+2025-05-04T15:45:46.439Z - INFO - Bot starting up on port 3000...
+2025-05-04T15:45:46.448Z - INFO - TELEGRAM_BOT_TOKEN: 8168939387:AAEFIQRFlrYhAQiZDdJOhgImu5QLkSoc3XQ
+2025-05-04T15:45:46.450Z - INFO - Webhook :1957-82-215-104-101.ngrok-free.app/webhook
+2025-05-04T15:46:00.592Z - INFO - Searching for category with URL: /catalog/dom-i-dacha/vannaya/aksessuary
+2025-05-04T15:46:00.603Z - INFO - Extracted 2604 categories
+2025-05-04T15:46:00.606Z - INFO - Total categories found: 2604
+2025-05-04T15:46:00.610Z - INFO - Found category: Аксессуары
+2025-05-04T15:46:01.004Z - INFO - Страница 1: получено 100 товаров
+2025-05-04T15:46:01.006Z - INFO - Страница 1: получено 100 товаров
+2025-05-04T15:46:04.066Z - INFO - Страница 2: получено 100 товаров
+2025-05-04T15:46:04.087Z - INFO - Страница 2: получено 100 товаров
+2025-05-04T15:46:05.781Z - INFO - Saved Excel to output\Аксессуары_analysis_1746373565721.xlsx
+2025-05-04T15:46:06.174Z - INFO - Excel report sent to user 6089511983: output\Аксессуары_analysis_1746373565721.xlsx
+2025-05-04T15:46:06.179Z - INFO - Total parsing time: 5.97 seconds
