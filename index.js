@@ -104,14 +104,14 @@ class FileService {
     }
     const worksheet = xlsx.utils.json_to_sheet(data);
     const workbook = xlsx.utils.book_new();
-    
+
     // Устанавливаем ширину столбцов
-    worksheet['!cols'] = [
-      { wch: 50 },  // Название
-      { wch: 30 },  // Количество товара
-      { wch: 30 }   // Частота товара
+    worksheet["!cols"] = [
+      { wch: 50 }, // Название
+      { wch: 30 }, // Количество товара
+      { wch: 30 }, // Частота товара
     ];
-    
+
     xlsx.utils.book_append_sheet(workbook, worksheet, "data");
     const filePath = path.join(outputDir, `${filename}.xlsx`);
 
@@ -155,7 +155,6 @@ class FileService {
           );
         }
       }, this.DELETE_FILE_TIMEOUT);
-
     } catch (error) {
       await this.bot.sendMessage(
         userId,
@@ -178,16 +177,27 @@ class EvirmaClient {
       Accept: "application/json",
       "Content-Type": "application/json",
     };
+    this.TIMEOUT = 30000; // 30 секунд
   }
 
   async queryEvirmaApi(keywords) {
     const payload = { keywords, an: false };
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.TIMEOUT);
+
       const response = await axios.post(
         "https://evirma.ru/api/v1/keyword/list",
         payload,
-        { headers: this.headers }
+        {
+          headers: this.headers,
+          signal: controller.signal,
+          timeout: this.TIMEOUT,
+        }
       );
+
+      clearTimeout(timeoutId);
+
       const filteredData = {
         data: {
           keywords: Object.fromEntries(
@@ -201,11 +211,20 @@ class EvirmaClient {
         ? filteredData
         : null;
     } catch (error) {
+      if (error.name === "AbortError" || error.code === "ECONNABORTED") {
+        const errorMessage =
+          "Ошибка сервера Evirma: превышено время ожидания (30 секунд)";
+        await logService.log(errorMessage, "error");
+        throw new Error(errorMessage);
+      }
+
+      await logService.log(error, "error");
+
       await logService.log(
-        `Error querying Evirma API: ${error.message}`,
+        `Ошибка при запросе к Evirma API: ${error.message}`,
         "error"
       );
-      return null;
+      throw new Error(`Ошибка при запросе к Evirma API: ${error.message}`);
     }
   }
 
@@ -347,7 +366,7 @@ class WildberriesParser {
     }
   }
 
-  async scrapeWbPage(page, category,isCancelled) {
+  async scrapeWbPage(page, category, isCancelled) {
     if (isCancelled) {
       throw new Error("Parsing cancelled by user");
     }
@@ -361,15 +380,21 @@ class WildberriesParser {
 
       if (isCancelled) {
         throw new Error("Parsing cancelled by user");
-      }  
+      }
 
       return { data: response.data, logMessage };
     } catch (error) {
-      await this.logService.log(
-        `Error scraping WB page: ${error.message}`,
-        "error"
-      );
-      throw error;
+      let errorMessage = `Ошибка при получении данных со страницы ${page}: ${error.message}`;
+      if (error.response) {
+        errorMessage += `\nСтатус: ${error.response.status}`;
+        if (error.response.data) {
+          errorMessage += `\nОтвет сервера: ${JSON.stringify(
+            error.response.data
+          )}`;
+        }
+      }
+      await this.logService.log(errorMessage, "error");
+      throw new Error(errorMessage);
     }
   }
 
@@ -433,10 +458,16 @@ class WildberriesParser {
             break;
           }
 
-          const evirmaResponse = await this.evirmaClient.queryEvirmaApi(
-            products
-          );
-          if (!evirmaResponse) break;
+          let evirmaResponse;
+          try {
+            evirmaResponse = await this.evirmaClient.queryEvirmaApi(products);
+            if (!evirmaResponse) break;
+          } catch (error) {
+            await bot.sendMessage(userId, `❌ ${error.message}`, {
+              parse_mode: "Markdown",
+            });
+            break;
+          }
 
           if (this.isCancelled) {
             await this.logService.log("Парсинг отменен пользователем.");
@@ -455,6 +486,22 @@ class WildberriesParser {
             await this.logService.log("Парсинг отменен пользователем.");
             break;
           }
+
+          // Отправляем сообщение пользователю об ошибке
+          await bot.sendMessage(userId, `❌ ${error.message}`, {
+            parse_mode: "Markdown",
+          });
+
+          // Прекращаем парсинг при ошибке scrapeWbPage
+          if (
+            error.message.includes("Ошибка при получении данных со страницы")
+          ) {
+            await this.logService.log(
+              "Парсинг прекращен из-за ошибки получения данных."
+            );
+            break;
+          }
+
           throw error;
         }
       }
@@ -606,20 +653,20 @@ class BotHandlers {
       if (!urlPattern.test(text)) {
         await bot.sendMessage(
           userId,
-          '❌ Ошибка: URL некорректен. Пожалуйста, используйте формат:\nhttps://www.wildberries.ru/catalog/<category>/<subcategory>/<subsubcategory>\nНапример: https://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksessuary\nПопробуйте снова или нажмите "Отмена".',
+          '❌ Ошибка: URL некорректен. Пожалуйста, используйте формат:\nhttps://www.wildberries.ru/catalog/<category>/<subcategory>/<subsubcategory>\nНапример: https://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksессuary\nПопробуйте снова или нажмите "Отмена".',
           { parse_mode: "Markdown", ...this.getUrlInputMenu() }
         );
         return;
       }
 
       await bot.sendMessage(userId, "🔄 Запускаю анализ категории...", {
-        reply_markup: { remove_keyboard: true } // Убираем клавиатуру при начале парсинга
+        reply_markup: { remove_keyboard: true }, // Убираем клавиатуру при начале парсинга
       });
-      
+
       const success = await this.parser.parseCategory(text, userId);
       await this.logService.clearLogMessages(userId);
       delete this.waitingForUrl[userId];
-      
+
       await bot.sendMessage(
         userId,
         success
@@ -643,7 +690,7 @@ class BotHandlers {
 
   // Метод для обработки входящих обновлений
   async processUpdate(update) {
-    // Проверка на наличие 
+    // Проверка на наличие
     if (update.message) {
       const msg = update.message;
       const text = msg.text;
