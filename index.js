@@ -94,6 +94,7 @@ class FileService {
   constructor(bot, logService) {
     this.bot = bot;
     this.logService = logService;
+    this.DELETE_FILE_TIMEOUT = 15000; // 15 seconds
   }
 
   async saveToExcel(data, filename) {
@@ -103,12 +104,20 @@ class FileService {
     }
     const worksheet = xlsx.utils.json_to_sheet(data);
     const workbook = xlsx.utils.book_new();
+    
+    // Устанавливаем ширину столбцов
+    worksheet['!cols'] = [
+      { wch: 50 },  // Название
+      { wch: 30 },  // Количество товара
+      { wch: 30 }   // Частота товара
+    ];
+    
     xlsx.utils.book_append_sheet(workbook, worksheet, "data");
     const filePath = path.join(outputDir, `${filename}.xlsx`);
-    
+
     // Ensure directory exists before writing
     await ensureDirsExist();
-    
+
     await fs.writeFile(
       filePath,
       xlsx.write(workbook, { type: "buffer", bookType: "xlsx" })
@@ -121,20 +130,32 @@ class FileService {
     try {
       // Проверяем доступ к файлу
       await fs.access(filePath);
-      
+
       const today = new Date().toLocaleDateString("ru-RU");
       const caption = `📊 *Анализ категории Wildberries* (${today})`;
-      
+
       await this.bot.sendDocument(userId, filePath, {
         caption,
         parse_mode: "Markdown",
       });
-      
+
       await this.logService.log(
         `Excel report sent to user ${userId}: ${filePath}`
       );
-      
-      // Очистка временных файлов не требуется в Vercel, т.к. /tmp очищается автоматически
+
+      // Установка таймера на удаление файла через 15 секунд
+      setTimeout(async () => {
+        try {
+          await fs.unlink(filePath);
+          await this.logService.log(`Temporary file deleted: ${filePath}`);
+        } catch (error) {
+          await this.logService.log(
+            `Error deleting temporary file ${filePath}: ${error.message}`,
+            "error"
+          );
+        }
+      }, this.DELETE_FILE_TIMEOUT);
+
     } catch (error) {
       await this.bot.sendMessage(
         userId,
@@ -216,6 +237,17 @@ class WildberriesParser {
       Accept: "application/json",
       "Content-Type": "application/json",
     };
+    this.MAX_PAGES = 10;
+    this.isCancelled = false;
+  }
+
+  cancelParsing() {
+    this.isCancelled = true;
+  }
+
+  resetParsing() {
+    this.isCancelled = false;
+    this.results = [];
   }
 
   async fetchWbCatalog() {
@@ -315,13 +347,22 @@ class WildberriesParser {
     }
   }
 
-  async scrapeWbPage(page, category) {
+  async scrapeWbPage(page, category,isCancelled) {
+    if (isCancelled) {
+      throw new Error("Parsing cancelled by user");
+    }
+
     const url = `https://catalog.wb.ru/catalog/${category.shard}/catalog?appType=1&curr=rub&dest=-1257786&locale=ru&page=${page}&sort=popular&spp=0&${category.query}`;
     try {
       const response = await axios.get(url, { headers: this.headers });
       const productsCount = response.data.data?.products?.length || 0;
       const logMessage = `Страница ${page}: получено ${productsCount} товаров`;
       await this.logService.log(logMessage);
+
+      if (isCancelled) {
+        throw new Error("Parsing cancelled by user");
+      }  
+
       return { data: response.data, logMessage };
     } catch (error) {
       await this.logService.log(
@@ -333,6 +374,9 @@ class WildberriesParser {
   }
 
   async processProducts(productsData) {
+    if (this.isCancelled) {
+      throw new Error("Parsing cancelled by user");
+    }
     return (productsData.data?.products || [])
       .filter((product) => "name" in product)
       .map((product) => product.name);
@@ -340,9 +384,14 @@ class WildberriesParser {
 
   async parseCategory(url, userId) {
     const startTime = Date.now();
-    this.results = [];
+    this.resetParsing();
 
     try {
+      if (this.isCancelled) {
+        await this.logService.log("Парсинг отменен пользователем.");
+        return true;
+      }
+
       const category = await this.findCategoryByUrl(url);
       if (!category) {
         await this.logService.log(
@@ -352,54 +401,62 @@ class WildberriesParser {
         return false;
       }
 
-      for (let page = 1; page <= 2; page++) {
-        const { data, logMessage } = await this.scrapeWbPage(page, category);
-        await this.logService.updateLogMessage(userId, logMessage);
+      for (let page = 1; page <= this.MAX_PAGES; page++) {
+        if (this.isCancelled) {
+          await this.logService.log("Парсинг отменен пользователем.");
+          break;
+        }
 
-        const products = await this.processProducts(data);
-        if (!products.length) {
-          await this.logService.log(
-            `Page ${page}: no products found, stopping parsing.`
+        try {
+          const { data, logMessage } = await this.scrapeWbPage(
+            page,
+            category,
+            this.isCancelled
           );
-          if (this.results.length) {
-            const filename = `${category.name}_analysis_${Date.now()}`;
-            const filePath = await this.fileService.saveToExcel(
-              this.results,
-              filename
-            );
-            if (filePath)
-              await this.fileService.sendExcelToUser(
-                filePath,
-                filename,
-                userId
-              );
-          }
-          break;
-        }
+          await this.logService.updateLogMessage(userId, logMessage);
 
-        const evirmaResponse = await this.evirmaClient.queryEvirmaApi(products);
-        if (!evirmaResponse) {
-          if (this.results.length) {
-            const filename = `${category.name}_analysis_${Date.now()}`;
-            const filePath = await this.fileService.saveToExcel(
-              this.results,
-              filename
-            );
-            if (filePath)
-              await this.fileService.sendExcelToUser(
-                filePath,
-                filename,
-                userId
-              );
+          if (this.isCancelled) {
+            await this.logService.log("Парсинг отменен пользователем.");
+            break;
           }
-          break;
-        }
 
-        const pageResults = await this.evirmaClient.parseEvirmaResponse(
-          evirmaResponse
-        );
-        this.results.push(...pageResults);
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+          const products = await this.processProducts(data);
+          if (!products.length) {
+            await this.logService.log(
+              `Page ${page}: no products found, stopping parsing.`
+            );
+            break;
+          }
+
+          if (this.isCancelled) {
+            await this.logService.log("Парсинг отменен пользователем.");
+            break;
+          }
+
+          const evirmaResponse = await this.evirmaClient.queryEvirmaApi(
+            products
+          );
+          if (!evirmaResponse) break;
+
+          if (this.isCancelled) {
+            await this.logService.log("Парсинг отменен пользователем.");
+            break;
+          }
+
+          const pageResults = await this.evirmaClient.parseEvirmaResponse(
+            evirmaResponse
+          );
+          this.results.push(...pageResults);
+
+          // Увеличиваем задержку между запросами
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        } catch (error) {
+          if (error.message === "Parsing cancelled by user") {
+            await this.logService.log("Парсинг отменен пользователем.");
+            break;
+          }
+          throw error;
+        }
       }
 
       if (this.results.length) {
@@ -415,10 +472,9 @@ class WildberriesParser {
       }
       return true;
     } catch (error) {
-      if (error.response?.status === 429) {
-        await this.logService.log("Maximum products parsed (429 error).");
+      if (error.message === "Parsing cancelled by user") {
         if (this.results.length) {
-          const filename = `${category.name || 'wb'}_analysis_${Date.now()}`;
+          const filename = `${category?.name || "wb"}_analysis_${Date.now()}`;
           const filePath = await this.fileService.saveToExcel(
             this.results,
             filename
@@ -428,9 +484,15 @@ class WildberriesParser {
         }
         return true;
       }
-      await this.logService.log(`Parsing error: ${error.message}`, "error");
+
+      if (error.response?.status === 429) {
+        await this.logService.log("Maximum products parsed (429 error).");
+      } else {
+        await this.logService.log(`Parsing error: ${error.message}`, "error");
+      }
+
       if (this.results.length) {
-        const filename = `${category?.name || 'wb'}_analysis_${Date.now()}`;
+        const filename = `${category?.name || "wb"}_analysis_${Date.now()}`;
         const filePath = await this.fileService.saveToExcel(
           this.results,
           filename
@@ -516,12 +578,22 @@ class BotHandlers {
   async handleText(msg) {
     const userId = msg.from.id;
     const text = msg.text.trim();
+    console.log("Received message:", text);
 
     if (text === "Парсить") return await this.manualParse(msg);
     if (text === "Список подписчиков") return await this.listAdmins(msg);
-    if (text === "Отмена" && this.waitingForUrl[userId]) {
-      delete this.waitingForUrl[userId];
-      await bot.sendMessage(userId, "❌ Ввод URL отменён.", {
+    if (text === "Отмена") {
+      console.log("Отмена парсинга пользователем:", userId);
+      if (this.waitingForUrl[userId]) {
+        delete this.waitingForUrl[userId];
+        await bot.sendMessage(userId, "❌ Ввод URL отменён.", {
+          parse_mode: "Markdown",
+          ...this.getMainMenu(userId),
+        });
+      }
+      // Отменяем текущий процесс парсинга
+      this.parser.cancelParsing();
+      await bot.sendMessage(userId, "🛑 Процесс парсинга отменяется...", {
         parse_mode: "Markdown",
         ...this.getMainMenu(userId),
       });
@@ -541,11 +613,13 @@ class BotHandlers {
       }
 
       await bot.sendMessage(userId, "🔄 Запускаю анализ категории...", {
-        ...this.getUrlInputMenu(),
+        reply_markup: { remove_keyboard: true } // Убираем клавиатуру при начале парсинга
       });
+      
       const success = await this.parser.parseCategory(text, userId);
       await this.logService.clearLogMessages(userId);
       delete this.waitingForUrl[userId];
+      
       await bot.sendMessage(
         userId,
         success
@@ -566,26 +640,26 @@ class BotHandlers {
       parse_mode: "Markdown",
     });
   }
-  
+
   // Метод для обработки входящих обновлений
   async processUpdate(update) {
-    // Проверка на наличие сообщения
+    // Проверка на наличие 
     if (update.message) {
       const msg = update.message;
       const text = msg.text;
       const userId = msg.from.id;
-      
+
       // Проверка на авторизацию
       if (!adminIds.includes(userId)) {
         return await this.handleUnauthorized(msg);
       }
-      
+
       // Обработка команд
-      if (text === '/start') {
+      if (text === "/start") {
         await this.start(msg);
-      } else if (text === '/list') {
+      } else if (text === "/list") {
         await this.listAdmins(msg);
-      } else if (text === '/parse') {
+      } else if (text === "/parse") {
         await this.manualParse(msg);
       } else {
         // Обработка текстовых сообщений
@@ -639,7 +713,7 @@ app.get("/api/setup", async (req, res) => {
     await bot.deleteWebHook();
     // Устанавливаем новый вебхук
     await bot.setWebHook(webhookUrl);
-    
+
     // Отправляем уведомление админам
     for (const adminId of adminIds) {
       try {
@@ -657,7 +731,7 @@ app.get("/api/setup", async (req, res) => {
         );
       }
     }
-    
+
     res.status(200).send("Webhook setup successful!");
   } catch (error) {
     await logService.log(`Setup webhook error: ${error.message}`, "error");
@@ -666,7 +740,7 @@ app.get("/api/setup", async (req, res) => {
 });
 
 // Для локальной разработки
-if (process.env.NODE_ENV === 'development') {
+if (process.env.NODE_ENV === "development") {
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, async () => {
     await logService.log(`Bot starting up on port ${PORT}...`);
