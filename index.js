@@ -330,15 +330,17 @@ class WildberriesParser {
 
       // Получаем параметры фильтрации
       const filterParams = {
-        priceU: searchParams.get('priceU') || null,
-        xsubject: searchParams.get('xsubject') || null,
-        fbrand: searchParams.get('fbrand') || null,
-        fsupplier: searchParams.get('fsupplier') || null,
-        sort: searchParams.get('sort') || 'popular'
+        priceU: searchParams.get("priceU") || null,
+        xsubject: searchParams.get("xsubject") || null,
+        fbrand: searchParams.get("fbrand") || null,
+        fsupplier: searchParams.get("fsupplier") || null,
+        sort: searchParams.get("sort") || "popular",
       };
 
       await this.logService.log(
-        `Searching for category with URL: ${baseUrl}\nFilter params: ${JSON.stringify(filterParams)}`
+        `Searching for category with URL: ${baseUrl}\nFilter params: ${JSON.stringify(
+          filterParams
+        )}`
       );
 
       const categories = await this.extractCategoryData(this.catalogData);
@@ -352,18 +354,20 @@ class WildberriesParser {
 
       if (category) {
         await this.logService.log(`Found category: ${category.name}`);
-        
+
         // Добавляем параметры фильтрации к query параметрам категории
-        let query = category.query || '';
+        let query = category.query || "";
         if (filterParams.priceU) query += `&priceU=${filterParams.priceU}`;
-        if (filterParams.xsubject) query += `&xsubject=${filterParams.xsubject}`;
+        if (filterParams.xsubject)
+          query += `&xsubject=${filterParams.xsubject}`;
         if (filterParams.fbrand) query += `&fbrand=${filterParams.fbrand}`;
-        if (filterParams.fsupplier) query += `&fsupplier=${filterParams.fsupplier}`;
+        if (filterParams.fsupplier)
+          query += `&fsupplier=${filterParams.fsupplier}`;
         if (filterParams.sort) query += `&sort=${filterParams.sort}`;
 
         return {
           ...category,
-          query: query
+          query: query,
         };
       }
 
@@ -412,7 +416,9 @@ class WildberriesParser {
   async parseCategory(url, userId) {
     // Проверяем, не идет ли уже парсинг для этого пользователя
     if (this.activeParsingUsers.has(userId)) {
-      await this.logService.log(`Parsing already in progress for user ${userId}`);
+      await this.logService.log(
+        `Parsing already in progress for user ${userId}`
+      );
       return false;
     }
 
@@ -423,9 +429,14 @@ class WildberriesParser {
     try {
       const category = await this.findCategoryByUrl(url);
       if (!category) {
-        await this.logService.log("Category not found. Check the URL.", "warning");
+        await this.logService.log(
+          "Category not found. Check the URL.",
+          "warning"
+        );
         return false;
       }
+
+      let hasEvirmaResponseWithFreq = false;
 
       for (let page = 1; page <= this.MAX_PAGES; page++) {
         try {
@@ -434,13 +445,18 @@ class WildberriesParser {
 
           const products = await this.processProducts(data);
           if (!products.length) {
-            await this.logService.log(`Page ${page}: no products found, stopping parsing.`);
+            await this.logService.log(
+              `Page ${page}: no products found, stopping parsing.`
+            );
             break;
           }
 
           let evirmaResponse;
           try {
             evirmaResponse = await this.evirmaClient.queryEvirmaApi(products);
+            // await this.logService.log(
+            //   `evirmaResponse: ${JSON.stringify(evirmaResponse)}`
+            // );
             if (!evirmaResponse) break;
           } catch (error) {
             await bot.sendMessage(userId, `❌ ${error.message}`, {
@@ -449,10 +465,11 @@ class WildberriesParser {
             break;
           }
 
-          const pageResults = await this.evirmaClient.parseEvirmaResponse(evirmaResponse);
+          const pageResults = await this.evirmaClient.parseEvirmaResponse(
+            evirmaResponse
+          );
           this.results.push(...pageResults);
 
-          // Увеличиваем задержку между запросами
           await new Promise((resolve) => setTimeout(resolve, 2000));
         } catch (error) {
           await bot.sendMessage(userId, `❌ ${error.message}`, {
@@ -462,22 +479,46 @@ class WildberriesParser {
         }
       }
 
+      await this.logService.log(`RESULTS  : ${this.results}`);
+
+      if (!this.results || !this.results.length ) {
+        // Если все товары имеют нулевую частоту
+        return await bot.sendMessage(
+          userId,
+          `📊 Найдены товары, но у всех частота поиска равна 0.\nВозможно, эти товары редко ищут или они новые в каталоге.`,
+          { parse_mode: "Markdown" }
+        );
+      }
+
       // Обработка результатов
-      if (this.results.length) {
+      if (this.results.length > 0) {
+        // Если есть товары с ненулевой частотой, отправляем Excel
         const filename = `${category.name}_analysis_${Date.now()}`;
-        const filePath = await this.fileService.saveToExcel(this.results, filename);
+        const filePath = await this.fileService.saveToExcel(
+          this.results,
+          filename
+        );
         if (filePath) {
           await this.fileService.sendExcelToUser(filePath, filename, userId);
         }
+      } else {
+        await bot.sendMessage(
+          userId,
+          "❌ Не найдено товаров в данной категории с указанными фильтрами.",
+          { parse_mode: "Markdown" }
+        );
       }
+
       return true;
     } catch (error) {
       await this.logService.log(`Parsing error: ${error.message}`, "error");
       return false;
     } finally {
-      this.activeParsingUsers.delete(userId); // Удаляем пользователя из активных парсингов
+      this.activeParsingUsers.delete(userId);
       const elapsedTime = (Date.now() - startTime) / 1000;
-      await this.logService.log(`Total parsing time: ${elapsedTime.toFixed(2)} seconds`);
+      await this.logService.log(
+        `Total parsing time: ${elapsedTime.toFixed(2)} seconds`
+      );
     }
   }
 }
@@ -542,7 +583,7 @@ class BotHandlers {
     this.waitingForUrl[userId] = "manual";
     await bot.sendMessage(
       userId,
-      "🔗 Пожалуйста, отправьте URL категории Wildberries в формате:\nhttps://www.wildberries.ru/catalog/<category>/<subcategory>/<subsubcategory>\nНапример: https://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksessuary",
+      "🔗 Пожалуйста, отправьте URL категории Wildberries в формате:\nhttps://www.wildberries.ru/catalog/<category>/\nНапример: https://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksessuary",
       { parse_mode: "Markdown", ...this.getUrlInputMenu() }
     );
   }
@@ -577,7 +618,7 @@ class BotHandlers {
       }
 
       // Простая проверка на соответствие домену Wildberries
-      if (!text.startsWith('https://www.wildberries.ru/catalog/')) {
+      if (!text.startsWith("https://www.wildberries.ru/catalog/")) {
         await bot.sendMessage(
           userId,
           '❌ Ошибка: Неверный URL. Ссылка должна быть с сайта www.wildberries.ru и начинаться с "https://www.wildberries.ru/catalog/"',
@@ -587,7 +628,7 @@ class BotHandlers {
       }
 
       await bot.sendMessage(userId, "🔄 Запускаю анализ категории...", {
-        reply_markup: { remove_keyboard: true }
+        reply_markup: { remove_keyboard: true },
       });
 
       try {
@@ -676,7 +717,7 @@ app.post("/api/webhook", async (req, res) => {
     const update = req.body;
     if (update.message) {
       const userId = update.message.from.id;
-      
+
       // Проверяем, не идет ли уже парсинг для этого пользователя
       if (wildberriesParser.activeParsingUsers.has(userId)) {
         await bot.sendMessage(
