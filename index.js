@@ -257,16 +257,7 @@ class WildberriesParser {
       "Content-Type": "application/json",
     };
     this.MAX_PAGES = 50;
-    this.isCancelled = false;
-  }
-
-  cancelParsing() {
-    this.isCancelled = true;
-  }
-
-  resetParsing() {
-    this.isCancelled = false;
-    this.results = [];
+    this.activeParsingUsers = new Set(); // Добавляем отслеживание активных парсингов
   }
 
   async fetchWbCatalog() {
@@ -366,21 +357,14 @@ class WildberriesParser {
     }
   }
 
-  async scrapeWbPage(page, category, isCancelled) {
-    if (isCancelled) {
-      throw new Error("Parsing cancelled by user");
-    }
-
+  async scrapeWbPage(page, category) {
     const url = `https://catalog.wb.ru/catalog/${category.shard}/catalog?appType=1&curr=rub&dest=-1257786&locale=ru&page=${page}&sort=popular&spp=0&${category.query}`;
+    this.logService.log(`URL : ${url}`);
     try {
       const response = await axios.get(url, { headers: this.headers });
       const productsCount = response.data.data?.products?.length || 0;
       const logMessage = `Страница ${page}: получено ${productsCount} товаров`;
       await this.logService.log(logMessage);
-
-      if (isCancelled) {
-        throw new Error("Parsing cancelled by user");
-      }
 
       return { data: response.data, logMessage };
     } catch (error) {
@@ -399,62 +383,37 @@ class WildberriesParser {
   }
 
   async processProducts(productsData) {
-    if (this.isCancelled) {
-      throw new Error("Parsing cancelled by user");
-    }
     return (productsData.data?.products || [])
       .filter((product) => "name" in product)
       .map((product) => product.name);
   }
 
   async parseCategory(url, userId) {
+    // Проверяем, не идет ли уже парсинг для этого пользователя
+    if (this.activeParsingUsers.has(userId)) {
+      await this.logService.log(`Parsing already in progress for user ${userId}`);
+      return false;
+    }
+
+    this.activeParsingUsers.add(userId);
     const startTime = Date.now();
-    this.resetParsing();
+    this.results = [];
 
     try {
-      if (this.isCancelled) {
-        await this.logService.log("Парсинг отменен пользователем.");
-        return true;
-      }
-
       const category = await this.findCategoryByUrl(url);
       if (!category) {
-        await this.logService.log(
-          "Category not found. Check the URL.",
-          "warning"
-        );
+        await this.logService.log("Category not found. Check the URL.", "warning");
         return false;
       }
 
       for (let page = 1; page <= this.MAX_PAGES; page++) {
-        if (this.isCancelled) {
-          await this.logService.log("Парсинг отменен пользователем.");
-          break;
-        }
-
         try {
-          const { data, logMessage } = await this.scrapeWbPage(
-            page,
-            category,
-            this.isCancelled
-          );
+          const { data, logMessage } = await this.scrapeWbPage(page, category);
           await this.logService.updateLogMessage(userId, logMessage);
-
-          if (this.isCancelled) {
-            await this.logService.log("Парсинг отменен пользователем.");
-            break;
-          }
 
           const products = await this.processProducts(data);
           if (!products.length) {
-            await this.logService.log(
-              `Page ${page}: no products found, stopping parsing.`
-            );
-            break;
-          }
-
-          if (this.isCancelled) {
-            await this.logService.log("Парсинг отменен пользователем.");
+            await this.logService.log(`Page ${page}: no products found, stopping parsing.`);
             break;
           }
 
@@ -469,90 +428,35 @@ class WildberriesParser {
             break;
           }
 
-          if (this.isCancelled) {
-            await this.logService.log("Парсинг отменен пользователем.");
-            break;
-          }
-
-          const pageResults = await this.evirmaClient.parseEvirmaResponse(
-            evirmaResponse
-          );
+          const pageResults = await this.evirmaClient.parseEvirmaResponse(evirmaResponse);
           this.results.push(...pageResults);
 
           // Увеличиваем задержку между запросами
           await new Promise((resolve) => setTimeout(resolve, 2000));
         } catch (error) {
-          if (error.message === "Parsing cancelled by user") {
-            await this.logService.log("Парсинг отменен пользователем.");
-            break;
-          }
-
-          // Отправляем сообщение пользователю об ошибке
           await bot.sendMessage(userId, `❌ ${error.message}`, {
             parse_mode: "Markdown",
           });
-
-          // Прекращаем парсинг при ошибке scrapeWbPage
-          if (
-            error.message.includes("Ошибка при получении данных со страницы")
-          ) {
-            await this.logService.log(
-              "Парсинг прекращен из-за ошибки получения данных."
-            );
-            break;
-          }
-
-          throw error;
+          break;
         }
       }
 
+      // Обработка результатов
       if (this.results.length) {
         const filename = `${category.name}_analysis_${Date.now()}`;
-        const filePath = await this.fileService.saveToExcel(
-          this.results,
-          filename
-        );
-        if (filePath)
+        const filePath = await this.fileService.saveToExcel(this.results, filename);
+        if (filePath) {
           await this.fileService.sendExcelToUser(filePath, filename, userId);
-      } else {
-        await this.logService.log("No products found matching criteria.");
+        }
       }
       return true;
     } catch (error) {
-      if (error.message === "Parsing cancelled by user") {
-        if (this.results.length) {
-          const filename = `${category?.name || "wb"}_analysis_${Date.now()}`;
-          const filePath = await this.fileService.saveToExcel(
-            this.results,
-            filename
-          );
-          if (filePath)
-            await this.fileService.sendExcelToUser(filePath, filename, userId);
-        }
-        return true;
-      }
-
-      if (error.response?.status === 429) {
-        await this.logService.log("Maximum products parsed (429 error).");
-      } else {
-        await this.logService.log(`Parsing error: ${error.message}`, "error");
-      }
-
-      if (this.results.length) {
-        const filename = `${category?.name || "wb"}_analysis_${Date.now()}`;
-        const filePath = await this.fileService.saveToExcel(
-          this.results,
-          filename
-        );
-        if (filePath)
-          await this.fileService.sendExcelToUser(filePath, filename, userId);
-      }
-      return true;
+      await this.logService.log(`Parsing error: ${error.message}`, "error");
+      return false;
     } finally {
+      this.activeParsingUsers.delete(userId); // Удаляем пользователя из активных парсингов
       const elapsedTime = (Date.now() - startTime) / 1000;
-      await this.logService.log(
-        `Total parsing time: ${elapsedTime.toFixed(2)} seconds`
-      );
+      await this.logService.log(`Total parsing time: ${elapsedTime.toFixed(2)} seconds`);
     }
   }
 }
@@ -638,16 +542,19 @@ class BotHandlers {
           ...this.getMainMenu(userId),
         });
       }
-      // Отменяем текущий процесс парсинга
-      this.parser.cancelParsing();
-      await bot.sendMessage(userId, "🛑 Процесс парсинга отменяется...", {
-        parse_mode: "Markdown",
-        ...this.getMainMenu(userId),
-      });
       return;
     }
 
     if (this.waitingForUrl[userId]) {
+      if (this.parser.activeParsingUsers.has(userId)) {
+        await bot.sendMessage(
+          userId,
+          "⏳ Парсинг уже выполняется. Пожалуйста, дождитесь завершения текущего процесса.",
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+
       // Простая проверка на соответствие домену Wildberries
       if (!text.startsWith('https://www.wildberries.ru/catalog/')) {
         await bot.sendMessage(
@@ -745,6 +652,22 @@ app.get("/api/health", async (req, res) => {
 // Webhook эндпоинт
 app.post("/api/webhook", async (req, res) => {
   try {
+    const update = req.body;
+    if (update.message) {
+      const userId = update.message.from.id;
+      
+      // Проверяем, не идет ли уже парсинг для этого пользователя
+      if (wildberriesParser.activeParsingUsers.has(userId)) {
+        await bot.sendMessage(
+          userId,
+          "⏳ Выполняется парсинг. Пожалуйста, дождитесь его завершения.",
+          { parse_mode: "Markdown" }
+        );
+        res.status(200).send("OK");
+        return;
+      }
+    }
+
     await logService.log("Received webhook update");
     await botHandlers.processUpdate(req.body);
     res.status(200).send("OK");
