@@ -323,27 +323,48 @@ class WildberriesParser {
         this.catalogData = await this.fetchWbCatalog();
       }
 
-      const relativeUrl = url.split("https://www.wildberries.ru")[1];
+      // Разбираем URL на базовый путь и параметры
+      const urlObj = new URL(url);
+      const baseUrl = urlObj.pathname;
+      const searchParams = urlObj.searchParams;
+
+      // Получаем параметры фильтрации
+      const filterParams = {
+        priceU: searchParams.get('priceU') || null,
+        xsubject: searchParams.get('xsubject') || null,
+        fbrand: searchParams.get('fbrand') || null,
+        fsupplier: searchParams.get('fsupplier') || null,
+        sort: searchParams.get('sort') || 'popular'
+      };
+
       await this.logService.log(
-        `Searching for category with URL: ${relativeUrl}`
+        `Searching for category with URL: ${baseUrl}\nFilter params: ${JSON.stringify(filterParams)}`
       );
 
       const categories = await this.extractCategoryData(this.catalogData);
-
-      // Добавляем отладочную информацию
       await this.logService.log(`Total categories found: ${categories.length}`);
 
       const category = categories.find((cat) => {
         const normalizedCatUrl = cat.url.toLowerCase().replace(/\/+$/, "");
-        const normalizedSearchUrl = relativeUrl
-          .toLowerCase()
-          .replace(/\/+$/, "");
+        const normalizedSearchUrl = baseUrl.toLowerCase().replace(/\/+$/, "");
         return normalizedCatUrl === normalizedSearchUrl;
       });
 
       if (category) {
         await this.logService.log(`Found category: ${category.name}`);
-        return category;
+        
+        // Добавляем параметры фильтрации к query параметрам категории
+        let query = category.query || '';
+        if (filterParams.priceU) query += `&priceU=${filterParams.priceU}`;
+        if (filterParams.xsubject) query += `&xsubject=${filterParams.xsubject}`;
+        if (filterParams.fbrand) query += `&fbrand=${filterParams.fbrand}`;
+        if (filterParams.fsupplier) query += `&fsupplier=${filterParams.fsupplier}`;
+        if (filterParams.sort) query += `&sort=${filterParams.sort}`;
+
+        return {
+          ...category,
+          query: query
+        };
       }
 
       await this.logService.log("Category not found in catalog", "warning");
