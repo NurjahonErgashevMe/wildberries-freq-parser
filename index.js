@@ -256,7 +256,7 @@ class WildberriesParser {
       Accept: "application/json",
       "Content-Type": "application/json",
     };
-    this.MAX_PAGES = 10;
+    this.MAX_PAGES = 50;
     this.isCancelled = false;
   }
 
@@ -648,32 +648,38 @@ class BotHandlers {
     }
 
     if (this.waitingForUrl[userId]) {
-      const urlPattern =
-        /^https:\/\/www\.wildberries\.ru\/catalog\/[\w-]+\/[\w-]+\/[\w-]+$/;
-      if (!urlPattern.test(text)) {
+      // Простая проверка на соответствие домену Wildberries
+      if (!text.startsWith('https://www.wildberries.ru/catalog/')) {
         await bot.sendMessage(
           userId,
-          '❌ Ошибка: URL некорректен. Пожалуйста, используйте формат:\nhttps://www.wildberries.ru/catalog/<category>/<subcategory>/<subsubcategory>\nНапример: https://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksессuary\nПопробуйте снова или нажмите "Отмена".',
+          '❌ Ошибка: Неверный URL. Ссылка должна быть с сайта www.wildberries.ru и начинаться с "https://www.wildberries.ru/catalog/"',
           { parse_mode: "Markdown", ...this.getUrlInputMenu() }
         );
         return;
       }
 
       await bot.sendMessage(userId, "🔄 Запускаю анализ категории...", {
-        reply_markup: { remove_keyboard: true }, // Убираем клавиатуру при начале парсинга
+        reply_markup: { remove_keyboard: true }
       });
 
-      const success = await this.parser.parseCategory(text, userId);
-      await this.logService.clearLogMessages(userId);
-      delete this.waitingForUrl[userId];
+      try {
+        const success = await this.parser.parseCategory(text, userId);
+        await this.logService.clearLogMessages(userId);
+        delete this.waitingForUrl[userId];
 
-      await bot.sendMessage(
-        userId,
-        success
-          ? "✅ Парсинг завершён."
-          : "❌ Ошибка: Категория не найдена или URL некорректен. Пожалуйста, используйте правильный формат.",
-        { parse_mode: "Markdown", ...this.getMainMenu(userId) }
-      );
+        await bot.sendMessage(
+          userId,
+          success ? "✅ Парсинг завершён." : "❌ Ошибка: Категория не найдена.",
+          { parse_mode: "Markdown", ...this.getMainMenu(userId) }
+        );
+      } catch (error) {
+        await bot.sendMessage(
+          userId,
+          `❌ Ошибка при получении категории: ${error.message}`,
+          { parse_mode: "Markdown", ...this.getMainMenu(userId) }
+        );
+        delete this.waitingForUrl[userId];
+      }
     }
   }
 
