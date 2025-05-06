@@ -5,6 +5,7 @@ const fs = require("fs").promises;
 const path = require("path");
 const xlsx = require("xlsx");
 const dotenv = require("dotenv");
+const {default: PQueue} = require("p-queue");
 
 // Создаем Express приложение
 const app = express();
@@ -13,12 +14,14 @@ app.use(express.json());
 // Загрузка переменных окружения
 dotenv.config();
 
-const { TELEGRAM_BOT_TOKEN, ADMIN_ID, VERCEL_APP_URL } = process.env;
+const { TELEGRAM_BOT_TOKEN, ADMIN_ID, APP_URL } = process.env;
 const adminIds = ADMIN_ID.split(",").map((id) => parseInt(id.trim()));
-const webhookUrl = `${VERCEL_APP_URL}/api/webhook`;
+const webhookUrl = `${APP_URL}/api/webhook`;
 
 // Инициализация бота в режиме webhook (без polling)
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
+
+const queue = new PQueue({ concurrency: 2, interval: 2000 });
 
 // Временные пути для хранения данных (в Vercel это будет работать только в рамках запроса)
 const outputDir = "/tmp/output";
@@ -182,49 +185,47 @@ class EvirmaClient {
 
   async queryEvirmaApi(keywords) {
     const payload = { keywords, an: false };
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.TIMEOUT);
+    const MAX_RETRIES = 3; // Максимальное количество попыток
+    let attempt = 0;
 
-      const response = await axios.post(
-        "https://evirma.ru/api/v1/keyword/list",
-        payload,
-        {
-          headers: this.headers,
-          signal: controller.signal,
-          timeout: this.TIMEOUT,
+    while (attempt < MAX_RETRIES) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.TIMEOUT);
+
+        const response = await axios.post(
+          "https://evirma.ru/api/v1/keyword/list",
+          payload,
+          {
+            headers: this.headers,
+            signal: controller.signal,
+            timeout: this.TIMEOUT,
+          }
+        );
+
+        clearTimeout(timeoutId);
+
+        const filteredData = {
+          data: {
+            keywords: Object.fromEntries(
+              Object.entries(response.data.data?.keywords || {}).filter(
+                ([, data]) => data.cluster !== null
+              )
+            ),
+          },
+        };
+        return Object.keys(filteredData.data.keywords).length
+          ? filteredData
+          : null;
+      } catch (error) {
+        attempt++;
+        if (attempt >= MAX_RETRIES) {
+          const errorMessage = `Ошибка при запросе к Evirma API: ${error.message}`;
+          await logService.log(errorMessage, "error");
+          throw new Error(errorMessage);
         }
-      );
-
-      clearTimeout(timeoutId);
-
-      const filteredData = {
-        data: {
-          keywords: Object.fromEntries(
-            Object.entries(response.data.data?.keywords || {}).filter(
-              ([, data]) => data.cluster !== null
-            )
-          ),
-        },
-      };
-      return Object.keys(filteredData.data.keywords).length
-        ? filteredData
-        : null;
-    } catch (error) {
-      if (error.name === "AbortError" || error.code === "ECONNABORTED") {
-        const errorMessage =
-          "Ошибка сервера Evirma: превышено время ожидания (30 секунд)";
-        await logService.log(errorMessage, "error");
-        throw new Error(errorMessage);
+        await new Promise((resolve) => setTimeout(resolve, 2000)); // Задержка перед повторной попыткой
       }
-
-      await logService.log(error, "error");
-
-      await logService.log(
-        `Ошибка при запросе к Evirma API: ${error.message}`,
-        "error"
-      );
-      throw new Error(`Ошибка при запросе к Evirma API: ${error.message}`);
     }
   }
 
@@ -257,7 +258,9 @@ class WildberriesParser {
       "Content-Type": "application/json",
     };
     this.MAX_PAGES = 50;
-    this.activeParsingUsers = new Set(); // Добавляем отслеживание активных парсингов
+    this.activeParsingUsers = new Set();
+
+    // Создаем очередь задач с ограничением на 2 параллельных запроса
   }
 
   async fetchWbCatalog() {
@@ -391,6 +394,9 @@ class WildberriesParser {
       const logMessage = `Страница ${page}: получено ${productsCount} товаров`;
       await this.logService.log(logMessage);
 
+      // Добавляем задержку между запросами
+      await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 секунды
+
       return { data: response.data, logMessage };
     } catch (error) {
       let errorMessage = `Ошибка при получении данных со страницы ${page}: ${error.message}`;
@@ -405,6 +411,10 @@ class WildberriesParser {
       await this.logService.log(errorMessage, "error");
       throw new Error(errorMessage);
     }
+  }
+
+  async scrapeWbPageWithQueue(page, category) {
+    return queue.add(() => this.scrapeWbPage(page, category));
   }
 
   async processProducts(productsData) {
@@ -436,11 +446,9 @@ class WildberriesParser {
         return false;
       }
 
-      let hasEvirmaResponseWithFreq = false;
-
       for (let page = 1; page <= this.MAX_PAGES; page++) {
         try {
-          const { data, logMessage } = await this.scrapeWbPage(page, category);
+          const { data, logMessage } = await this.scrapeWbPageWithQueue(page, category);
           await this.logService.updateLogMessage(userId, logMessage);
 
           const products = await this.processProducts(data);
@@ -454,9 +462,6 @@ class WildberriesParser {
           let evirmaResponse;
           try {
             evirmaResponse = await this.evirmaClient.queryEvirmaApi(products);
-            // await this.logService.log(
-            //   `evirmaResponse: ${JSON.stringify(evirmaResponse)}`
-            // );
             if (!evirmaResponse) break;
           } catch (error) {
             await bot.sendMessage(userId, `❌ ${error.message}`, {
@@ -469,8 +474,6 @@ class WildberriesParser {
             evirmaResponse
           );
           this.results.push(...pageResults);
-
-          await new Promise((resolve) => setTimeout(resolve, 2000));
         } catch (error) {
           await bot.sendMessage(userId, `❌ ${error.message}`, {
             parse_mode: "Markdown",
@@ -479,10 +482,7 @@ class WildberriesParser {
         }
       }
 
-      await this.logService.log(`RESULTS  : ${this.results}`);
-
-      if (!this.results || !this.results.length ) {
-        // Если все товары имеют нулевую частоту
+      if (!this.results || !this.results.length) {
         return await bot.sendMessage(
           userId,
           `📊 Найдены товары, но у всех частота поиска равна 0.\nВозможно, эти товары редко ищут или они новые в каталоге.`,
@@ -490,9 +490,7 @@ class WildberriesParser {
         );
       }
 
-      // Обработка результатов
       if (this.results.length > 0) {
-        // Если есть товары с ненулевой частотой, отправляем Excel
         const filename = `${category.name}_analysis_${Date.now()}`;
         const filePath = await this.fileService.saveToExcel(
           this.results,

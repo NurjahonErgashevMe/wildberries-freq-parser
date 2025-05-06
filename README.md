@@ -52,7 +52,7 @@ Telegram бот для анализа категорий Wildberries с возм
 ```env
 TELEGRAM_BOT_TOKEN=ваш_токен_бота
 ADMIN_ID=id1,id2,id3
-VERCEL_APP_URL=url_вашего_приложения
+APP_URL=url_вашего_приложения
 SETUP_SECRET=секретный_ключ
 ```
 
