@@ -149,6 +149,20 @@ class FileService {
     this.DELETE_FILE_TIMEOUT = 15000; // 15 seconds
   }
 
+  // Добавьте этот метод в класс FileService
+  normalizeProductName(name) {
+    if (!name || typeof name !== "string") return name;
+
+    const original = name;
+    const normalized = name.trim().replace(/\s+/g, " ");
+
+    if (original !== normalized) {
+      console.log(`Normalized product name: "${original}" -> "${normalized}"`);
+    }
+
+    return normalized;
+  }
+
   async readExcelFile(filePath, userId) {
     // Уведомляем о начале обработки
     await this.bot.sendMessage(userId, `👁 Смотрю файл...`, {
@@ -246,9 +260,21 @@ class FileService {
       const today = new Date().toLocaleDateString("ru-RU");
       const caption = `📊 *Анализ категории Wildberries* (${today})`;
 
+      // Получаем размер файла
+      const stats = await fs.stat(filePath);
+      const fileSizeInBytes = stats.size;
+      const fileSizeInMegabytes = fileSizeInBytes / (1024 * 1024);
+
+      // Проверяем размер файла (Telegram ограничение ~50MB)
+      if (fileSizeInMegabytes > 50) {
+        throw new Error("413 Request Entity Too Large");
+      }
+
       await this.bot.sendDocument(userId, filePath, {
         caption,
         parse_mode: "Markdown",
+        contentType:
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
 
       await this.logService.log(
@@ -268,11 +294,46 @@ class FileService {
         }
       }, this.DELETE_FILE_TIMEOUT);
     } catch (error) {
-      await this.bot.sendMessage(
-        userId,
-        `❌ Ошибка при отправке файла: ${error.message}`,
-        { parse_mode: "Markdown" }
-      );
+      if (error.message.includes("413 Request Entity Too Large")) {
+        // Создаем папку output если ее нет
+        const outputDir = path.join(process.cwd(), "output");
+        try {
+          await fs.mkdir(outputDir, { recursive: true });
+
+          // Генерируем имя файла с timestamp
+          const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+          const newFilename = `${filename}_${timestamp}.xlsx`;
+          const newFilePath = path.join(outputDir, newFilename);
+
+          // Копируем файл в папку output
+          await fs.copyFile(filePath, newFilePath);
+
+          // Отправляем сообщение пользователю
+          const message = `📁 Файл слишком большой для отправки через Telegram (>50MB).\nОн был сохранен локально: \`${newFilePath}\``;
+          await this.bot.sendMessage(userId, message, {
+            parse_mode: "Markdown",
+          });
+
+          await this.logService.log(`Large file saved locally: ${newFilePath}`);
+        } catch (saveError) {
+          await this.logService.log(
+            `Failed to save large file locally: ${saveError.message}`,
+            "error"
+          );
+          await this.bot.sendMessage(
+            userId,
+            `❌ Ошибка при сохранении файла: ${saveError.message}`,
+            { parse_mode: "Markdown" }
+          );
+        }
+      } else {
+        await this.bot.sendMessage(
+          userId,
+          `❌ Ошибка при отправке файла: ${error.message}`,
+          { parse_mode: "Markdown" }
+        );
+      }
+
       await this.logService.log(
         `Failed to send Excel to user ${userId}: ${error.message}`,
         "error"
@@ -300,7 +361,11 @@ class EvirmaClient {
     const MAX_RETRIES = 10;
     const RETRY_DELAY = 30000; // 30 seconds
 
-    for (let i = 0; i < names.length; i += BATCH_SIZE) {
+    const normalizedNames = names.map((name) =>
+      this.fileService.normalizeProductName(name)
+    );
+
+    for (let i = 0; i < normalizedNames.length; i += BATCH_SIZE) {
       // Add delays for large datasets
       if (i > 0) {
         if (i % 100000 === 0) {
@@ -316,28 +381,28 @@ class EvirmaClient {
         }
       }
 
-      const batch = names.slice(i, i + BATCH_SIZE);
+      const batch = normalizedNames.slice(i, i + BATCH_SIZE);
 
       // Update logs based on data size
-      if (names.length >= 2000) {
+      if (normalizedNames.length >= 2000) {
         if (i % (BATCH_SIZE * 100) === 0) {
           const logMessage = `🔄 Обрабатываем товары: ${i + 1}-${Math.min(
             i + BATCH_SIZE * 100,
-            names.length
-          )} из ${names.length}`;
+            normalizedNames.length
+          )} из ${normalizedNames.length}`;
           await this.logService.updateLogMessage(userId, logMessage);
         } else {
           const logMessage = `🔄 Обрабатываем товары: ${i + 1}-${Math.min(
             i + BATCH_SIZE,
-            names.length
-          )} из ${names.length}`;
+            normalizedNames.length
+          )} из ${normalizedNames.length}`;
           await this.logService.log(logMessage);
         }
       } else {
         const logMessage = `🔄 Обрабатываем товары: ${i + 1}-${Math.min(
           i + BATCH_SIZE,
-          names.length
-        )} из ${names.length}`;
+          normalizedNames.length
+        )} из ${normalizedNames.length}`;
         await this.logService.updateLogMessage(userId, logMessage);
       }
 
@@ -364,7 +429,7 @@ class EvirmaClient {
               i + 1
             }-${Math.min(
               i + BATCH_SIZE,
-              names.length
+              normalizedNames.length
             )} после ${MAX_RETRIES} попыток`;
             await this.logService.updateLogMessage(userId, errorMessage);
           }
@@ -376,9 +441,10 @@ class EvirmaClient {
     }
 
     return names.map((name) => {
-      const found = results.find((item) => item["Название"] === name);
+      const normalizedName = this.fileService.normalizeProductName(name);
+      const found = results.find((item) => item["Название"] === normalizedName);
       return {
-        Название: name,
+        Название: normalizedName,
         [fieldToUpdate]: found ? found[fieldToUpdate] : 0,
       };
     });
@@ -423,9 +489,11 @@ class EvirmaClient {
   async parseEvirmaResponse(evirmaData) {
     const parsedData = [];
     if (!evirmaData?.data?.keywords) return parsedData;
+
     for (const [keyword, keywordData] of Object.entries(
       evirmaData.data.keywords
     )) {
+      const normalizedKeyword = this.fileService.normalizeProductName(keyword)
       // Skip if cluster is null or counts are 0
       if (
         !keywordData.cluster ||
@@ -436,7 +504,7 @@ class EvirmaClient {
       }
 
       parsedData.push({
-        Название: keyword,
+        Название: normalizedKeyword,
         "Количество товара": keywordData.cluster.product_count,
         "Частота товара": keywordData.cluster.freq_syn.monthly,
       });
@@ -459,7 +527,7 @@ class ExcelParser {
       // Читаем Excel файл
       const data = await this.fileService.readExcelFile(filePath, userId);
       const names = data
-        .map((row) => row["Название"])
+        .map((row) => this.fileService.normalizeProductName(row["Название"]))
         .filter((name) => name && name.trim() !== "");
 
       if (!names || names.length === 0) {
@@ -1081,7 +1149,7 @@ class WildberriesParser {
   async processProducts(productsData) {
     return (productsData.data?.products || [])
       .filter((product) => "name" in product)
-      .map((product) => product.name);
+      .map((product) => this.fileService.normalizeProductName(product.name));
   }
 
   async parseCategory(url, userId) {
