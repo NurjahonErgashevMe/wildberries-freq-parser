@@ -5,7 +5,7 @@ const fs = require("fs").promises;
 const path = require("path");
 const xlsx = require("xlsx");
 const dotenv = require("dotenv");
-const {default: PQueue} = require("p-queue");
+const { default: PQueue } = require("p-queue");
 
 // Создаем Express приложение
 const app = express();
@@ -14,16 +14,15 @@ app.use(express.json());
 // Загрузка переменных окружения
 dotenv.config();
 
-const { TELEGRAM_BOT_TOKEN, ADMIN_ID, APP_URL } = process.env;
+const { TELEGRAM_BOT_TOKEN, ADMIN_ID } = process.env;
 const adminIds = ADMIN_ID.split(",").map((id) => parseInt(id.trim()));
-const webhookUrl = `${APP_URL}/api/webhook`;
 
-// Инициализация бота в режиме webhook (без polling)
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
+// Инициализация бота в режиме polling
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
 const queue = new PQueue({ concurrency: 2, interval: 2000 });
 
-// Временные пути для хранения данных (в Vercel это будет работать только в рамках запроса)
+// Временные пути для хранения данных
 const outputDir = "/tmp/output";
 const logDir = "/tmp/logs";
 const logFilePath = path.join(logDir, "wb_parser.log");
@@ -58,7 +57,29 @@ class LogService {
 
   async updateLogMessage(userId, logMessage) {
     await this.log(logMessage);
+
+    // Add delay every 10 requests
+    if (
+      this.logMessages[userId]?.text?.length % 10 === 0 &&
+      this.logMessages[userId]?.text?.length > 0
+    ) {
+      const delayMessage = "⏳ Пауза 10 секунд после 10 запросов...";
+      await this.log(delayMessage);
+      await bot.editMessageText(
+        `📄 *Логи парсинга:*\n${this.logMessages[userId].text.join(
+          "\n"
+        )}\n${delayMessage}`,
+        {
+          chat_id: userId,
+          message_id: this.logMessages[userId].messageId,
+          parse_mode: "Markdown",
+        }
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10000)); // 10 second delay
+    }
+
     if (!this.logMessages[userId]) {
+      // Create initial message
       const message = await bot.sendMessage(
         userId,
         `📄 *Логи парсинга:*\n${logMessage}`,
@@ -71,19 +92,47 @@ class LogService {
     } else {
       const currentLogs = this.logMessages[userId].text;
       currentLogs.push(logMessage);
-      const newText = `📄 *Логи парсинга:*\n${currentLogs.join("\n")}`;
-      try {
-        await bot.editMessageText(newText, {
-          chat_id: userId,
-          message_id: this.logMessages[userId].messageId,
-          parse_mode: "Markdown",
-        });
-        this.logMessages[userId].text = currentLogs;
-      } catch (error) {
-        await this.log(
-          `Failed to update log for user ${userId}: ${error.message}`,
-          "error"
-        );
+
+      // If reached 30 messages, delete old message and create new one
+      if (currentLogs.length >= 20) {
+        try {
+          // Delete old message
+          await bot.deleteMessage(userId, this.logMessages[userId].messageId);
+
+          // Create new message with latest logs
+          const message = await bot.sendMessage(
+            userId,
+            `📄 *Логи парсинга:*\n${logMessage}`,
+            { parse_mode: "Markdown" }
+          );
+
+          // Reset logs array and update message ID
+          this.logMessages[userId] = {
+            messageId: message.message_id,
+            text: [logMessage],
+          };
+        } catch (error) {
+          await this.log(
+            `Failed to reset logs for user ${userId}: ${error.message}`,
+            "error"
+          );
+        }
+      } else {
+        // Update existing message
+        const newText = `📄 *Логи парсинга:*\n${currentLogs.join("\n")}`;
+        try {
+          await bot.editMessageText(newText, {
+            chat_id: userId,
+            message_id: this.logMessages[userId].messageId,
+            parse_mode: "Markdown",
+          });
+          this.logMessages[userId].text = currentLogs;
+        } catch (error) {
+          await this.log(
+            `Failed to update log for user ${userId}: ${error.message}`,
+            "error"
+          );
+        }
       }
     }
   }
@@ -98,6 +147,66 @@ class FileService {
     this.bot = bot;
     this.logService = logService;
     this.DELETE_FILE_TIMEOUT = 15000; // 15 seconds
+  }
+
+  async readExcelFile(filePath, userId) {
+    // Уведомляем о начале обработки
+    await this.bot.sendMessage(userId, `👁 Смотрю файл...`, {
+      reply_markup: { remove_keyboard: true },
+    });
+    try {
+      const fileBuffer = await fs.readFile(filePath);
+      const workbook = xlsx.read(fileBuffer);
+      const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+      return xlsx.utils.sheet_to_json(worksheet);
+    } catch (error) {
+      await this.logService.log(
+        `Error reading Excel file: ${error.message}`,
+        "error"
+      );
+      throw error;
+    }
+  }
+
+  async updateExcelFile(filePath, data, updateField) {
+    try {
+      const fileBuffer = await fs.readFile(filePath);
+      const workbook = xlsx.read(fileBuffer);
+      const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+
+      // Обновляем данные
+      const jsonData = xlsx.utils.sheet_to_json(worksheet);
+      const updatedData = jsonData.map((row, index) => ({
+        ...row,
+        [updateField]: data[index]?.[updateField] || row[updateField] || "",
+      }));
+
+      // Создаем новый worksheet с обновленными данными
+      const newWorksheet = xlsx.utils.json_to_sheet(updatedData);
+
+      // Устанавливаем ширину столбцов
+      newWorksheet["!cols"] = [
+        { wch: 50 }, // Название
+        { wch: 30 }, // Частота товара
+        { wch: 30 }, // Количество товара
+      ];
+
+      // Обновляем workbook
+      workbook.Sheets[workbook.SheetNames[0]] = newWorksheet;
+
+      // Сохраняем обновленный файл
+      await fs.writeFile(
+        filePath,
+        xlsx.write(workbook, { type: "buffer", bookType: "xlsx" })
+      );
+      return filePath;
+    } catch (error) {
+      await this.logService.log(
+        `Error updating Excel file: ${error.message}`,
+        "error"
+      );
+      throw error;
+    }
   }
 
   async saveToExcel(data, filename) {
@@ -181,9 +290,101 @@ class EvirmaClient {
       "Content-Type": "application/json",
     };
     this.TIMEOUT = 30000; // 30 секунд
+    this.logService = logService;
   }
 
-  async queryEvirmaApi(keywords) {
+  async processExcelData(names, fieldToUpdate, progressCallback, userId) {
+    const BATCH_SIZE = 100;
+    const results = [];
+    let processedCount = 0;
+    const MAX_RETRIES = 10;
+    const RETRY_DELAY = 30000; // 30 seconds
+
+    for (let i = 0; i < names.length; i += BATCH_SIZE) {
+      // Add delays for large datasets
+      if (i > 0) {
+        if (i % 100000 === 0) {
+          const restMessage =
+            "⏳ Делаем перерыв на 60 секунд после 100к запросов...";
+          await this.logService.updateLogMessage(userId, restMessage);
+          await new Promise((resolve) => setTimeout(resolve, 60000)); // 1 minute delay
+        } else if (i % 20000 === 0) {
+          const restMessage =
+            "⏳ Делаем перерыв на 30 секунд после 20к запросов...";
+          await this.logService.updateLogMessage(userId, restMessage);
+          await new Promise((resolve) => setTimeout(resolve, 30000)); // 30 seconds delay
+        }
+      }
+
+      const batch = names.slice(i, i + BATCH_SIZE);
+
+      // Update logs based on data size
+      if (names.length >= 2000) {
+        if (i % (BATCH_SIZE * 100) === 0) {
+          const logMessage = `🔄 Обрабатываем товары: ${i + 1}-${Math.min(
+            i + BATCH_SIZE * 100,
+            names.length
+          )} из ${names.length}`;
+          await this.logService.updateLogMessage(userId, logMessage);
+        } else {
+          const logMessage = `🔄 Обрабатываем товары: ${i + 1}-${Math.min(
+            i + BATCH_SIZE,
+            names.length
+          )} из ${names.length}`;
+          await this.logService.log(logMessage);
+        }
+      } else {
+        const logMessage = `🔄 Обрабатываем товары: ${i + 1}-${Math.min(
+          i + BATCH_SIZE,
+          names.length
+        )} из ${names.length}`;
+        await this.logService.updateLogMessage(userId, logMessage);
+      }
+
+      let attempt = 0;
+      let success = false;
+
+      while (!success && attempt < MAX_RETRIES) {
+        try {
+          const evirmaResponse = await this.queryEvirmaApi(batch, userId);
+          if (evirmaResponse) {
+            const batchResults = await this.parseEvirmaResponse(evirmaResponse);
+            results.push(...batchResults);
+            success = true;
+          }
+        } catch (error) {
+          attempt++;
+          const retryMessage = `⚠️ Ошибка (попытка ${attempt}/${MAX_RETRIES}): ${error.message}. Ожидание 30 секунд...`;
+          await this.logService.updateLogMessage(userId, retryMessage);
+
+          if (attempt < MAX_RETRIES) {
+            await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY));
+          } else {
+            const errorMessage = `❌ Не удалось обработать товары ${
+              i + 1
+            }-${Math.min(
+              i + BATCH_SIZE,
+              names.length
+            )} после ${MAX_RETRIES} попыток`;
+            await this.logService.updateLogMessage(userId, errorMessage);
+          }
+        }
+      }
+
+      processedCount += batch.length;
+      if (progressCallback) progressCallback(processedCount);
+    }
+
+    return names.map((name) => {
+      const found = results.find((item) => item["Название"] === name);
+      return {
+        Название: name,
+        [fieldToUpdate]: found ? found[fieldToUpdate] : 0,
+      };
+    });
+  }
+
+  async queryEvirmaApi(keywords, userId) {
     const payload = { keywords, an: false };
     const MAX_RETRIES = 3; // Максимальное количество попыток
     let attempt = 0;
@@ -204,27 +405,17 @@ class EvirmaClient {
         );
 
         clearTimeout(timeoutId);
-
-        const filteredData = {
-          data: {
-            keywords: Object.fromEntries(
-              Object.entries(response.data.data?.keywords || {}).filter(
-                ([, data]) => data.cluster !== null
-              )
-            ),
-          },
-        };
-        return Object.keys(filteredData.data.keywords).length
-          ? filteredData
-          : null;
+        return response.data;
       } catch (error) {
         attempt++;
+        const retryMessage = `⚠️ Попытка ${attempt}/${MAX_RETRIES} для ключевых слов`;
+        await this.logService.updateLogMessage(userId, retryMessage);
+
         if (attempt >= MAX_RETRIES) {
-          const errorMessage = `Ошибка при запросе к Evirma API: ${error.message}`;
-          await logService.log(errorMessage, "error");
+          const errorMessage = `❌ Ошибка при запросе к Evirma API: ${error.message}`;
+          await this.logService.updateLogMessage(userId, errorMessage);
           throw new Error(errorMessage);
         }
-        await new Promise((resolve) => setTimeout(resolve, 2000)); // Задержка перед повторной попыткой
       }
     }
   }
@@ -235,13 +426,215 @@ class EvirmaClient {
     for (const [keyword, keywordData] of Object.entries(
       evirmaData.data.keywords
     )) {
+      // Skip if cluster is null or counts are 0
+      if (
+        !keywordData.cluster ||
+        !keywordData.cluster.product_count ||
+        !keywordData.cluster.freq_syn?.monthly
+      ) {
+        continue;
+      }
+
       parsedData.push({
         Название: keyword,
-        "Количество товара": keywordData.cluster?.product_count || 0,
-        "Частота товара": keywordData.cluster?.freq_syn?.monthly || 0,
+        "Количество товара": keywordData.cluster.product_count,
+        "Частота товара": keywordData.cluster.freq_syn.monthly,
       });
     }
     return parsedData;
+  }
+}
+
+class ExcelParser {
+  constructor(bot, fileService, evirmaClient, logService) {
+    this.bot = bot;
+    this.fileService = fileService;
+    this.evirmaClient = evirmaClient;
+    this.logService = logService;
+    this.userStates = {};
+  }
+
+  async handleExcelFile(userId, fileId, filePath) {
+    try {
+      // Читаем Excel файл
+      const data = await this.fileService.readExcelFile(filePath, userId);
+      const names = data
+        .map((row) => row["Название"])
+        .filter((name) => name && name.trim() !== "");
+
+      if (!names || names.length === 0) {
+        throw new Error("Не найдены названия товаров в колонке 'Название'");
+      }
+
+      // Определяем доступные поля
+      const hasFrequency = data.some(
+        (row) => row["Частота товара"] !== undefined
+      );
+      const hasQuantity = data.some(
+        (row) => row["Количество товара"] !== undefined
+      );
+
+      // Сохраняем состояние
+      this.userStates[userId] = {
+        filePath,
+        data,
+        names,
+        hasFrequency,
+        hasQuantity,
+      };
+
+      // Отправляем клавиатуру с действиями
+      await this.sendActionKeyboard(userId, names.length);
+    } catch (error) {
+      await this.bot.sendMessage(
+        userId,
+        `❌ Ошибка при обработке файла: ${error.message}`,
+        { parse_mode: "Markdown" }
+      );
+      await this.logService.log(`Excel file error: ${error.message}`, "error");
+
+      // Удаляем временный файл при ошибке
+      try {
+        await fs.unlink(filePath);
+      } catch (e) {
+        await this.logService.log(`Error deleting file: ${e.message}`, "error");
+      }
+    }
+  }
+
+  async sendActionKeyboard(userId, itemsCount) {
+    const state = this.userStates[userId];
+    if (!state) return;
+
+    const keyboard = {
+      keyboard: [],
+      resize_keyboard: true,
+      one_time_keyboard: true,
+    };
+
+    // Формируем кнопки на основе доступных данных
+    if (!state.hasFrequency) {
+      keyboard.keyboard.push(["Добавить частоту товаров"]);
+    } else {
+      keyboard.keyboard.push(["Обновить частоту товаров"]);
+    }
+
+    if (!state.hasQuantity) {
+      keyboard.keyboard.push(["Добавить количество товаров"]);
+    } else {
+      keyboard.keyboard.push(["Обновить количество товаров"]);
+    }
+
+    keyboard.keyboard.push(["Отмена"]);
+
+    await this.bot.sendMessage(
+      userId,
+      `📊 Файл успешно обработан. Найдено товаров: ${itemsCount}\nВыберите действие:`,
+      { reply_markup: keyboard }
+    );
+  }
+
+  async processUserChoice(userId, choice) {
+    if (!this.userStates[userId]) {
+      await this.bot.sendMessage(
+        userId,
+        "❌ Сессия устарела. Пожалуйста, отправьте файл заново.",
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    const state = this.userStates[userId];
+    const { names, filePath } = state;
+
+    try {
+      // Очищаем старые логи
+      await this.logService.clearLogMessages(userId);
+
+      // Определяем поле для обновления
+      const fieldToUpdate = choice.includes("частот")
+        ? "Частота товара"
+        : "Количество товара";
+
+      // Уведомляем о начале обработки
+      const processingMsg = await this.bot.sendMessage(
+        userId,
+        `⏳ Начинаю ${choice.toLowerCase()} для ${names.length} товаров...`,
+        { reply_markup: { remove_keyboard: true } }
+      );
+
+      this.logService.log("Обрабатываем данные", "info");
+      // Обрабатываем данные
+      const results = await this.evirmaClient.processExcelData(
+        names,
+        fieldToUpdate,
+        null,
+        userId
+      );
+
+      this.logService.log("Обновляем файл", "info");
+
+      // Обновляем файл
+      const updatedFilePath = await this.fileService.updateExcelFile(
+        filePath,
+        results,
+        fieldToUpdate
+      );
+
+      // Отправляем обновленный файл
+      await this.fileService.sendExcelToUser(
+        updatedFilePath,
+        `updated_${Date.now()}`,
+        userId
+      );
+
+      // Уведомляем о завершении
+      await this.bot.sendMessage(
+        userId,
+        `✅ ${choice} успешно завершено!\nОбработано товаров: ${names.length}`,
+        { parse_mode: "Markdown" }
+      );
+    } catch (error) {
+      if (error.response && error.response.statusCode === 429) {
+        const retryAfter = error?.response.body.parameters.retry_after || 10; // По умолчанию 10 секунд
+        await this.bot.sendMessage(
+          userId,
+          `⚠️ Превышен лимит запросов. Повторная попытка через ${retryAfter} секунд...`,
+          { parse_mode: "Markdown" }
+        );
+        await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
+        return this.processUserChoice(userId, choice); // Повторяем попытку
+      }
+
+      await this.bot.sendMessage(
+        userId,
+        `❌ Ошибка при ${choice.toLowerCase()}: ${error.message}`,
+        { parse_mode: "Markdown" }
+      );
+      await this.logService.log(
+        `Excel processing error: ${error.message}`,
+        "error"
+      );
+    } finally {
+      // Очищаем состояние
+      // delete this.userStates[userId];
+      // Удаляем временный файл
+      try {
+        await fs.unlink(filePath);
+        // await this.logService.log('finally');
+      } catch (e) {
+        await this.logService.log(`Error deleting file: ${e.message}`, "error");
+      }
+    }
+  }
+
+  async cancelProcessing(userId) {
+    if (this.userStates[userId]) {
+      delete this.userStates[userId];
+      await this.logService.log(
+        `Обработка Excel отменена пользователем ${userId}`
+      );
+    }
   }
 }
 
@@ -259,8 +652,7 @@ class WildberriesParser {
     };
     this.MAX_PAGES = 50;
     this.activeParsingUsers = new Set();
-
-    // Создаем очередь задач с ограничением на 2 параллельных запроса
+    this.RETRY_WAIT_TIME = 30000; // 30 секунд
   }
 
   async fetchWbCatalog() {
@@ -318,6 +710,238 @@ class WildberriesParser {
 
     await this.logService.log(`Extracted ${categories.length} categories`);
     return categories;
+  }
+
+  async findSearchByUrl(url) {
+    try {
+      const urlObj = new URL(url);
+      const searchParams = urlObj.searchParams;
+
+      // Получаем поисковый запрос
+      const searchQuery = searchParams.get("search") || "";
+      const decodedQuery = decodeURIComponent(searchQuery);
+
+      // Извлекаем все параметры фильтрации, кроме page
+      const filterParams = {};
+      for (const [key, value] of searchParams.entries()) {
+        if (key !== "search" && key !== "page") {
+          filterParams[key] = value;
+        }
+      }
+
+      await this.logService.log(
+        `Search query: ${decodedQuery}\nFilter params: ${JSON.stringify(
+          filterParams
+        )}`
+      );
+
+      return {
+        query: decodedQuery,
+        filters: filterParams,
+      };
+    } catch (error) {
+      await this.logService.log(
+        `Error in findSearchByUrl: ${error.message}`,
+        "error"
+      );
+      throw error;
+    }
+  }
+
+  async scrapeWbSearchPage(page, searchParams, userId) {
+    const { query, filters } = searchParams;
+    const encodedQuery = encodeURIComponent(query);
+
+    // Базовый URL поиска
+    let url = `https://search.wb.ru/exactmatch/sng/common/v13/search?ab_testing=false&appType=1&curr=rub&dest=-1257786&lang=ru&page=${page}&query=${encodedQuery}&resultset=catalog&sort=popular&spp=0`;
+
+    // Добавляем все параметры фильтрации
+    for (const [key, value] of Object.entries(filters)) {
+      url += `&${key}=${encodeURIComponent(value)}`;
+    }
+
+    await this.logService.log(`Search URL: ${url}`);
+    const MAX_RETRIES = 6;
+    let attempt = 0;
+
+    while (attempt < MAX_RETRIES) {
+      try {
+        const response = await axios.get(url, { headers: this.headers });
+        const productsCount = response.data.data?.products?.length || 0;
+        const logMessage = `Страница поиска ${page}: получено ${productsCount} товаров`;
+        await this.logService.log(logMessage);
+
+        // Добавляем задержку между запросами
+        if (page % 10 === 0) {
+          await this.logService.log("Ждем 10 секунд после 10 страниц...");
+          await new Promise((resolve) => setTimeout(resolve, 10000));
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+
+        return { data: response.data, logMessage };
+      } catch (error) {
+        attempt++;
+        if (error.response && error.response.status === 429) {
+          const retryMessage = `ℹ️ Возникла ошибка с лимитом Wildberries, отправим через ${
+            this.RETRY_WAIT_TIME / 1000
+          } секунд.`;
+          await this.logService.log(retryMessage, "warning");
+          const botMessage = await bot.sendMessage(userId, retryMessage, {
+            parse_mode: "markdown",
+          });
+          await new Promise((resolve) =>
+            setTimeout(resolve, this.RETRY_WAIT_TIME)
+          );
+          const updateMessage = `Отправляем запрос для поиска, страница ${page}, попытка: ${attempt}`;
+          await bot.editMessageText(updateMessage, {
+            chat_id: userId,
+            message_id: botMessage.message_id,
+            parse_mode: "markdown",
+          });
+          await this.logService.log(updateMessage);
+          continue;
+        }
+
+        let errorMessage = `Ошибка при поиске товаров, страница ${page}: ${error.message}`;
+        if (error.response) {
+          errorMessage += `\nСтатус: ${error.response.status}`;
+          if (error.response.data) {
+            errorMessage += `\nОтвет сервера: ${JSON.stringify(
+              error.response.data
+            )}`;
+          }
+        }
+        await this.logService.log(errorMessage, "error");
+        throw new Error(errorMessage);
+      }
+    }
+
+    throw new Error(
+      `Не удалось выполнить поиск, страница ${page} после ${MAX_RETRIES} попыток.`
+    );
+  }
+
+  async scrapeWbSearchPageWithQueue(page, searchParams, userId) {
+    return queue.add(() => this.scrapeWbSearchPage(page, searchParams, userId));
+  }
+
+  async parseSearch(url, userId) {
+    if (this.activeParsingUsers.has(userId)) {
+      await this.logService.log(
+        `Parsing already in progress for user ${userId}`
+      );
+      return false;
+    }
+
+    // Очищаем старые логи
+    await this.logService.clearLogMessages(userId);
+
+    this.activeParsingUsers.add(userId);
+    const startTime = Date.now();
+    this.results = [];
+
+    try {
+      const searchParams = await this.findSearchByUrl(url);
+      if (!searchParams.query) {
+        await this.logService.log(
+          "Search query not found. Check the URL.",
+          "warning"
+        );
+        return false;
+      }
+
+      for (let page = 1; page <= this.MAX_PAGES; page++) {
+        try {
+          const { data, logMessage } = await this.scrapeWbSearchPageWithQueue(
+            page,
+            searchParams,
+            userId
+          );
+          await this.logService.updateLogMessage(userId, logMessage);
+
+          const products = await this.processProducts(data);
+          if (!products.length) {
+            await this.logService.log(
+              `Page ${page}: no products found, stopping parsing.`
+            );
+            break;
+          }
+
+          let evirmaResponse;
+          try {
+            evirmaResponse = await this.evirmaClient.queryEvirmaApi(
+              products,
+              userId
+            );
+            if (!evirmaResponse) break;
+          } catch (error) {
+            await bot.sendMessage(userId, `❌ ${error.message}`, {
+              parse_mode: "Markdown",
+            });
+            break;
+          }
+
+          const pageResults = await this.evirmaClient.parseEvirmaResponse(
+            evirmaResponse
+          );
+          this.results.push(...pageResults);
+        } catch (error) {
+          await bot.sendMessage(userId, `❌ ${error.message}`, {
+            parse_mode: "Markdown",
+          });
+          break;
+        }
+      }
+
+      if (!this.results || !this.results.length) {
+        return await bot.sendMessage(
+          userId,
+          `📊 Найдены товары, но у всех частота поиска равна 0.\nВозможно, эти товары редко ищут или они новые в каталоге.`,
+          { parse_mode: "Markdown" }
+        );
+      }
+
+      if (this.results.length > 0) {
+        const filename = `search_${searchParams.query}_analysis_${Date.now()}`;
+        const filePath = await this.fileService.saveToExcel(
+          this.results,
+          filename
+        );
+        if (filePath) {
+          await this.fileService.sendExcelToUser(filePath, filename, userId);
+        }
+      } else {
+        await bot.sendMessage(
+          userId,
+          "❌ Не найдено товаров по данному поисковому запросу с указанными фильтрами.",
+          { parse_mode: "Markdown" }
+        );
+      }
+
+      return true;
+    } catch (error) {
+      await this.logService.log(
+        `Search parsing error: ${error.message}`,
+        "error"
+      );
+      return false;
+    } finally {
+      this.activeParsingUsers.delete(userId);
+      const elapsedTime = (Date.now() - startTime) / 1000;
+      await this.logService.log(
+        `Total search parsing time: ${elapsedTime.toFixed(2)} seconds`
+      );
+    }
+  }
+
+  async parseUrl(url, userId) {
+    // Определяем тип URL (каталог или поиск)
+    if (url.includes("/search.aspx?")) {
+      return this.parseSearch(url, userId);
+    } else {
+      return this.parseCategory(url, userId);
+    }
   }
 
   async findCategoryByUrl(url) {
@@ -385,36 +1009,73 @@ class WildberriesParser {
     }
   }
 
-  async scrapeWbPage(page, category) {
+  async scrapeWbPage(page, category, userId) {
     const url = `https://catalog.wb.ru/catalog/${category.shard}/catalog?appType=1&curr=rub&dest=-1257786&locale=ru&page=${page}&sort=popular&spp=0&${category.query}`;
     this.logService.log(`URL : ${url}`);
-    try {
-      const response = await axios.get(url, { headers: this.headers });
-      const productsCount = response.data.data?.products?.length || 0;
-      const logMessage = `Страница ${page}: получено ${productsCount} товаров`;
-      await this.logService.log(logMessage);
+    const MAX_RETRIES = 6;
+    let attempt = 0;
 
-      // Добавляем задержку между запросами
-      await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 секунды
+    while (attempt < MAX_RETRIES) {
+      try {
+        const response = await axios.get(url, { headers: this.headers });
+        const productsCount = response.data.data?.products?.length || 0;
+        const logMessage = `Страница ${page}: получено ${productsCount} товаров`;
+        await this.logService.log(url);
+        await this.logService.log(logMessage);
 
-      return { data: response.data, logMessage };
-    } catch (error) {
-      let errorMessage = `Ошибка при получении данных со страницы ${page}: ${error.message}`;
-      if (error.response) {
-        errorMessage += `\nСтатус: ${error.response.status}`;
-        if (error.response.data) {
-          errorMessage += `\nОтвет сервера: ${JSON.stringify(
-            error.response.data
-          )}`;
+        // Добавляем задержку между запросами
+        if (page % 10 === 0) {
+          await this.logService.log("Ждем 10 секунд после 10 запросов...");
+          await new Promise((resolve) => setTimeout(resolve, 10000)); // 10 секунд
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 секунды
         }
+
+        return { data: response.data, logMessage };
+      } catch (error) {
+        attempt++;
+        if (error.response && error.response.status === 429) {
+          const retryMessage = `ℹ️ Возникла ошибка с лимитом Wildberries, отправим через ${
+            this.RETRY_WAIT_TIME / 1000
+          } секунд.`;
+          await this.logService.log(retryMessage, "warning");
+          const botMessage = await bot.sendMessage(userId, retryMessage, {
+            parse_mode: "markdown",
+          });
+          await new Promise((resolve) =>
+            setTimeout(resolve, this.RETRY_WAIT_TIME)
+          );
+          const updateMessage = `Отправляем запрос для получения данных для страницы ${page}, попытка: ${attempt}`;
+          await bot.editMessageText(updateMessage, {
+            chat_id: userId,
+            message_id: botMessage.message_id,
+            parse_mode: "markdown",
+          });
+          await this.logService.log(updateMessage);
+          continue;
+        }
+
+        let errorMessage = `Ошибка при получении данных со страницы ${page}: ${error.message}`;
+        if (error.response) {
+          errorMessage += `\nСтатус: ${error.response.status}`;
+          if (error.response.data) {
+            errorMessage += `\nОтвет сервера: ${JSON.stringify(
+              error.response.data
+            )}`;
+          }
+        }
+        await this.logService.log(errorMessage, "error");
+        throw new Error(errorMessage);
       }
-      await this.logService.log(errorMessage, "error");
-      throw new Error(errorMessage);
     }
+
+    throw new Error(
+      `Не удалось получить данные для страницы ${page} после ${MAX_RETRIES} попыток.`
+    );
   }
 
-  async scrapeWbPageWithQueue(page, category) {
-    return queue.add(() => this.scrapeWbPage(page, category));
+  async scrapeWbPageWithQueue(page, category, userId) {
+    return queue.add(() => this.scrapeWbPage(page, category, userId));
   }
 
   async processProducts(productsData) {
@@ -448,7 +1109,11 @@ class WildberriesParser {
 
       for (let page = 1; page <= this.MAX_PAGES; page++) {
         try {
-          const { data, logMessage } = await this.scrapeWbPageWithQueue(page, category);
+          const { data, logMessage } = await this.scrapeWbPageWithQueue(
+            page,
+            category,
+            userId
+          );
           await this.logService.updateLogMessage(userId, logMessage);
 
           const products = await this.processProducts(data);
@@ -461,7 +1126,10 @@ class WildberriesParser {
 
           let evirmaResponse;
           try {
-            evirmaResponse = await this.evirmaClient.queryEvirmaApi(products);
+            evirmaResponse = await this.evirmaClient.queryEvirmaApi(
+              products,
+              userId
+            );
             if (!evirmaResponse) break;
           } catch (error) {
             await bot.sendMessage(userId, `❌ ${error.message}`, {
@@ -527,24 +1195,83 @@ class BotHandlers {
     this.parser = parser;
     this.logService = logService;
     this.waitingForUrl = {};
+    this.waitingForExcel = {};
+    this.excelParser = excelParser;
   }
 
   registerHandlers() {
-    // Все обработчики сообщений регистрируются на объекте бота
-    // но фактически обрабатываются через webhook
+    // Обработчик команды /start
+    this.bot.onText(/\/start/, (msg) => {
+      this.start(msg);
+    });
+
+    // Обработчик команды /list
+    this.bot.onText(/\/list/, (msg) => {
+      this.listAdmins(msg);
+    });
+
+    // Обработчик команды /parsing_from_excel
+    this.bot.onText(/\/parsing_from_excel/, (msg) => {
+      this.startExcelParse(msg);
+    });
+
+    // Обработчик команды /parse
+    this.bot.onText(/\/parse/, (msg) => {
+      this.manualParse(msg);
+    });
+
+    // Обработчик текстовых сообщений
+    this.bot.on("message", async (msg) => {
+      if (!msg.text) return;
+
+      const text = msg.text.trim();
+      const userId = msg.from.id;
+
+      // Если это не команда (не начинается с /)
+
+      if (text === "Отмена") {
+        return this.handleCancel(msg); // Теперь это вернет в главное меню
+      }
+
+      if (
+        this.excelParser.userStates[userId] &&
+        (text === "Добавить частоту товаров" ||
+          text === "Обновить частоту товаров" ||
+          text === "Добавить количество товаров" ||
+          text === "Обновить количество товаров")
+      ) {
+        await this.excelParser.processUserChoice(userId, text);
+        return;
+      }
+
+      if (!text.startsWith("/")) {
+        if (text === "Парсить") return this.manualParse(msg);
+        if (text === "Парсить Excel") return this.startExcelParse(msg);
+        if (text === "Список подписчиков") return this.listAdmins(msg);
+        if (text === "Отмена") return this.handleCancel(msg);
+
+        this.handleText(msg);
+      }
+    });
+
+    // Обработчик документов
+    this.bot.on("document", async (msg) => {
+      await this.handleDocument(msg);
+    });
   }
 
   getMainMenu(userId) {
     const keyboard = {
-      reply_markup: {
-        keyboard: [["Парсить"]],
-        resize_keyboard: true,
-        one_time_keyboard: true,
-      },
+      keyboard: [["Парсить"], ["Парсить Excel"]],
+      resize_keyboard: true,
+      one_time_keyboard: true,
     };
-    if (adminIds.includes(userId))
-      keyboard.reply_markup.keyboard.push(["Список подписчиков"]);
-    return keyboard;
+
+    if (adminIds.includes(userId)) {
+      keyboard.keyboard.push(["Список подписчиков"]);
+    }
+
+    return { reply_markup: keyboard };
   }
 
   getUrlInputMenu() {
@@ -559,16 +1286,29 @@ class BotHandlers {
 
   async start(msg) {
     const userId = msg.from.id;
+    if (!adminIds.includes(userId)) {
+      return this.handleUnauthorized(msg);
+    }
+
     const welcomeText =
-      "🛍️ *Wilberries Parser Frequency Bot*\n\nЭтот бот анализирует категории Wildberries и предоставляет статистику частоты поиска товаров.\n\nДоступные команды:\n/parse - Запросить анализ категории\n/list - Показать список админов (только для админов)";
+      "🛍️Wilberries Parser Frequency Bot\nЭтот бот анализирует категории Wildberries и предоставляет статистику частоты поиска товаров.\n\nДоступные команды:\n/parse - Запросить анализ категории\n/parsing_from_excel - парсинг продуктов по эксель\n/list - Показать список админов (только для админов)";
+
+    // Получаем клавиатуру главного меню
+    const menuOptions = this.getMainMenu(userId);
+
     await bot.sendMessage(userId, welcomeText, {
-      parse_mode: "Markdown",
-      ...this.getMainMenu(userId),
+      // parse_mode: "Markdown",
+      // ...this.getMainMenu(userId),
+      reply_markup: menuOptions.reply_markup,
     });
   }
 
   async listAdmins(msg) {
     const userId = msg.from.id;
+    if (!adminIds.includes(userId)) {
+      return this.handleUnauthorized(msg);
+    }
+
     const adminsList = adminIds.map((id) => `- ${id}`).join("\n");
     await bot.sendMessage(userId, `📋 Список админов:\n${adminsList}`, {
       parse_mode: "Markdown",
@@ -578,31 +1318,125 @@ class BotHandlers {
 
   async manualParse(msg) {
     const userId = msg.from.id;
+    if (!adminIds.includes(userId)) {
+      return this.handleUnauthorized(msg);
+    }
+
     this.waitingForUrl[userId] = "manual";
     await bot.sendMessage(
       userId,
-      "🔗 Пожалуйста, отправьте URL категории Wildberries в формате:\nhttps://www.wildberries.ru/catalog/<category>/\nНапример: https://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksessuary",
+      "🔗 Пожалуйста, отправьте URL категории Wildberries или поисковый запрос с фильтрами в формате:\n\n" +
+        "1. Для категории: https://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksessuary\n" +
+        "2. Для поиска: https://www.wildberries.ru/catalog/0/search.aspx?search=%D0%BC%D1%83%D0%B6%D1%81%D0%BA%D0%B8%D0%B5%20%D1%85%D1%83%D0%B4%D0%B8\n\n" +
+        "Поддерживаются все параметры фильтрации Wildberries (кроме page).",
       { parse_mode: "Markdown", ...this.getUrlInputMenu() }
     );
+  }
+
+  async handleCancel(msg) {
+    const userId = msg.from.id;
+
+    // Очищаем все состояния
+    if (this.waitingForUrl[userId]) {
+      delete this.waitingForUrl[userId];
+      await this.logService.log(
+        `Парсинг по URL отменен пользователем ${userId}`
+      );
+    }
+
+    if (this.waitingForExcel[userId]) {
+      delete this.waitingForExcel[userId];
+      await this.logService.log(
+        `Парсинг Excel отменен пользователем ${userId}`
+      );
+    }
+
+    if (this.excelParser.userStates[userId]) {
+      await this.excelParser.cancelProcessing(userId);
+    }
+
+    // Возвращаем в главное меню
+    await this.showMainMenu(userId, "❌ Действие отменено");
+  }
+
+  async showMainMenu(userId, message = "") {
+    const text = message
+      ? `${message}\n\nВыберите действие:`
+      : "Выберите действие:";
+
+    await this.bot.sendMessage(userId, text, {
+      parse_mode: "Markdown",
+      ...this.getMainMenu(userId),
+    });
+  }
+
+  async startExcelParse(msg) {
+    const userId = msg.from.id;
+    if (!adminIds.includes(userId)) {
+      return this.handleUnauthorized(msg);
+    }
+
+    this.waitingForExcel[userId] = true;
+    await this.bot.sendMessage(
+      userId,
+      "📊 Пожалуйста, отправьте Excel файл с колонкой 'Название'. Файл должен быть в формате .xlsx",
+      {
+        parse_mode: "Markdown",
+        reply_markup: {
+          keyboard: [["Отмена"]],
+          resize_keyboard: true,
+          one_time_keyboard: true,
+        },
+      }
+    );
+  }
+
+  async handleDocument(msg) {
+    const userId = msg.from.id;
+    if (!this.waitingForExcel[userId] || !msg.document) return;
+
+    try {
+      // Проверяем расширение файла
+      if (!msg.document.file_name.endsWith(".xlsx")) {
+        throw new Error("Файл должен быть в формате .xlsx");
+      }
+
+      const fileId = msg.document.file_id;
+      const tempDir = path.join(outputDir, "temp");
+      await fs.mkdir(tempDir, { recursive: true });
+      const filePath = path.join(tempDir, `${userId}_${fileId}.xlsx`);
+
+      // Скачиваем файл
+      const file = await this.bot.getFile(fileId);
+      const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+      const response = await axios.get(fileUrl, {
+        responseType: "arraybuffer",
+      });
+
+      await fs.writeFile(filePath, response.data);
+
+      // Обрабатываем файл
+      await this.excelParser.handleExcelFile(userId, fileId, filePath);
+    } catch (error) {
+      await this.logService.log(
+        `Error handling document: ${error.message}`,
+        "error"
+      );
+      await this.bot.sendMessage(
+        userId,
+        `❌ Ошибка: ${error.message}\nПожалуйста, попробуйте еще раз.`,
+        { parse_mode: "Markdown", ...this.getMainMenu(userId) }
+      );
+      delete this.waitingForExcel[userId];
+    }
   }
 
   async handleText(msg) {
     const userId = msg.from.id;
     const text = msg.text.trim();
-    console.log("Received message:", text);
 
-    if (text === "Парсить") return await this.manualParse(msg);
-    if (text === "Список подписчиков") return await this.listAdmins(msg);
-    if (text === "Отмена") {
-      console.log("Отмена парсинга пользователем:", userId);
-      if (this.waitingForUrl[userId]) {
-        delete this.waitingForUrl[userId];
-        await bot.sendMessage(userId, "❌ Ввод URL отменён.", {
-          parse_mode: "Markdown",
-          ...this.getMainMenu(userId),
-        });
-      }
-      return;
+    if (!adminIds.includes(userId)) {
+      return this.handleUnauthorized(msg);
     }
 
     if (this.waitingForUrl[userId]) {
@@ -615,7 +1449,7 @@ class BotHandlers {
         return;
       }
 
-      // Простая проверка на соответствие домену Wildberries
+      // Проверяем, что это URL Wildberries (категория или поиск)
       if (!text.startsWith("https://www.wildberries.ru/catalog/")) {
         await bot.sendMessage(
           userId,
@@ -625,24 +1459,28 @@ class BotHandlers {
         return;
       }
 
-      await bot.sendMessage(userId, "🔄 Запускаю анализ категории...", {
-        reply_markup: { remove_keyboard: true },
-      });
+      await bot.sendMessage(
+        userId,
+        "🔄 Запускаю анализ с учетом всех указанных фильтров...",
+        { reply_markup: { remove_keyboard: true } }
+      );
 
       try {
-        const success = await this.parser.parseCategory(text, userId);
+        const success = await this.parser.parseUrl(text, userId);
         await this.logService.clearLogMessages(userId);
         delete this.waitingForUrl[userId];
 
         await bot.sendMessage(
           userId,
-          success ? "✅ Парсинг завершён." : "❌ Ошибка: Категория не найдена.",
+          success
+            ? "✅ Парсинг завершён."
+            : "❌ Ошибка: Не удалось выполнить парсинг.",
           { parse_mode: "Markdown", ...this.getMainMenu(userId) }
         );
       } catch (error) {
         await bot.sendMessage(
           userId,
-          `❌ Ошибка при получении категории: ${error.message}`,
+          `❌ Ошибка при парсинге: ${error.message}`,
           { parse_mode: "Markdown", ...this.getMainMenu(userId) }
         );
         delete this.waitingForUrl[userId];
@@ -660,33 +1498,6 @@ class BotHandlers {
       parse_mode: "Markdown",
     });
   }
-
-  // Метод для обработки входящих обновлений
-  async processUpdate(update) {
-    // Проверка на наличие
-    if (update.message) {
-      const msg = update.message;
-      const text = msg.text;
-      const userId = msg.from.id;
-
-      // Проверка на авторизацию
-      if (!adminIds.includes(userId)) {
-        return await this.handleUnauthorized(msg);
-      }
-
-      // Обработка команд
-      if (text === "/start") {
-        await this.start(msg);
-      } else if (text === "/list") {
-        await this.listAdmins(msg);
-      } else if (text === "/parse") {
-        await this.manualParse(msg);
-      } else {
-        // Обработка текстовых сообщений
-        await this.handleText(msg);
-      }
-    }
-  }
 }
 
 // Initialize services
@@ -698,81 +1509,23 @@ const wildberriesParser = new WildberriesParser(
   evirmaClient,
   logService
 );
-const botHandlers = new BotHandlers(bot, wildberriesParser, logService);
+const excelParser = new ExcelParser(bot, fileService, evirmaClient, logService);
+const botHandlers = new BotHandlers(
+  bot,
+  wildberriesParser,
+  logService,
+  excelParser
+);
 
 // Инициализация директорий при старте
 ensureDirsExist();
 
-// API routes для Vercel
-// Health check эндпоинт
+// Регистрируем обработчики
+botHandlers.registerHandlers();
+
+// Health check эндпоинт (если нужно сохранить Express)
 app.get("/api/health", async (req, res) => {
   res.status(200).send("Bot is running");
-});
-
-// Webhook эндпоинт
-app.post("/api/webhook", async (req, res) => {
-  try {
-    const update = req.body;
-    if (update.message) {
-      const userId = update.message.from.id;
-
-      // Проверяем, не идет ли уже парсинг для этого пользователя
-      if (wildberriesParser.activeParsingUsers.has(userId)) {
-        await bot.sendMessage(
-          userId,
-          "⏳ Выполняется парсинг. Пожалуйста, дождитесь его завершения.",
-          { parse_mode: "Markdown" }
-        );
-        res.status(200).send("OK");
-        return;
-      }
-    }
-
-    await logService.log("Received webhook update");
-    await botHandlers.processUpdate(req.body);
-    res.status(200).send("OK");
-  } catch (error) {
-    await logService.log(`Webhook error: ${error.message}`, "error");
-    res.status(500).send("Internal Server Error");
-  }
-});
-
-// Эндпоинт для установки вебхука
-app.get("/api/setup", async (req, res) => {
-  const secretToken = req.query.token;
-  if (secretToken !== process.env.SETUP_SECRET) {
-    return res.status(403).send("Unauthorized");
-  }
-
-  try {
-    // Удаляем старый вебхук, если он был
-    await bot.deleteWebHook();
-    // Устанавливаем новый вебхук
-    await bot.setWebHook(webhookUrl);
-
-    // Отправляем уведомление админам
-    for (const adminId of adminIds) {
-      try {
-        await bot.sendMessage(
-          adminId,
-          "🤖 *Бот запущен и готов к работе!*\nВаш ID: " +
-            adminId +
-            "\nИспользуйте /start для начала работы.",
-          { parse_mode: "Markdown" }
-        );
-      } catch (error) {
-        await logService.log(
-          `Failed to notify admin ${adminId}: ${error.message}`,
-          "error"
-        );
-      }
-    }
-
-    res.status(200).send("Webhook setup successful!");
-  } catch (error) {
-    await logService.log(`Setup webhook error: ${error.message}`, "error");
-    res.status(500).send(`Error setting up webhook: ${error.message}`);
-  }
 });
 
 // Для локальной разработки
@@ -780,9 +1533,8 @@ if (process.env.NODE_ENV === "development") {
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, async () => {
     await logService.log(`Bot starting up on port ${PORT}...`);
-    await logService.log(`Webhook URL: ${webhookUrl}`);
   });
 }
 
-// Экспортируем приложение для Vercel
+// Экспортируем приложение для Vercel (если нужно)
 module.exports = app;
