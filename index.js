@@ -493,7 +493,7 @@ class EvirmaClient {
     for (const [keyword, keywordData] of Object.entries(
       evirmaData.data.keywords
     )) {
-      const normalizedKeyword = this.fileService.normalizeProductName(keyword)
+      const normalizedKeyword = this.fileService.normalizeProductName(keyword);
       // Skip if cluster is null or counts are 0
       if (
         !keywordData.cluster ||
@@ -1258,47 +1258,41 @@ class WildberriesParser {
 }
 
 class BotHandlers {
-  constructor(bot, parser, logService) {
+  constructor(bot, parser, logService, excelParser) {
     this.bot = bot;
     this.parser = parser;
     this.logService = logService;
+    this.excelParser = excelParser;
     this.waitingForUrl = {};
     this.waitingForExcel = {};
-    this.excelParser = excelParser;
+    // this.userLinks = {};
   }
 
   registerHandlers() {
-    // Обработчик команды /start
     this.bot.onText(/\/start/, (msg) => {
       this.start(msg);
     });
 
-    // Обработчик команды /list
     this.bot.onText(/\/list/, (msg) => {
       this.listAdmins(msg);
     });
 
-    // Обработчик команды /parsing_from_excel
-    this.bot.onText(/\/parsing_from_excel/, (msg) => {
+    this.bot.onText(/\/parsingfromexcel/, (msg) => {
       this.startExcelParse(msg);
     });
 
-    // Обработчик команды /parse
     this.bot.onText(/\/parse/, (msg) => {
       this.manualParse(msg);
     });
 
-    // Обработчик текстовых сообщений
     this.bot.on("message", async (msg) => {
       if (!msg.text) return;
 
       const text = msg.text.trim();
       const userId = msg.from.id;
 
-      // Если это не команда (не начинается с /)
-
       if (text === "Отмена") {
-        return this.handleCancel(msg); // Теперь это вернет в главное меню
+        return this.handleCancel(msg);
       }
 
       if (
@@ -1316,30 +1310,25 @@ class BotHandlers {
         if (text === "Парсить") return this.manualParse(msg);
         if (text === "Парсить Excel") return this.startExcelParse(msg);
         if (text === "Список подписчиков") return this.listAdmins(msg);
-        if (text === "Отмена") return this.handleCancel(msg);
-
-        this.handleText(msg);
+        if (this.waitingForUrl[userId]) return this.handleText(msg);
       }
     });
 
-    // Обработчик документов
     this.bot.on("document", async (msg) => {
       await this.handleDocument(msg);
     });
+
+    // this.bot.on("callback_query", async (query) => {
+    //   await this.handleCallbackQuery(query);
+    // });
   }
 
   getMainMenu(userId) {
-    const keyboard = {
+    return {
       keyboard: [["Парсить"], ["Парсить Excel"]],
       resize_keyboard: true,
       one_time_keyboard: true,
     };
-
-    if (adminIds.includes(userId)) {
-      keyboard.keyboard.push(["Список подписчиков"]);
-    }
-
-    return { reply_markup: keyboard };
   }
 
   getUrlInputMenu() {
@@ -1361,13 +1350,9 @@ class BotHandlers {
     const welcomeText =
       "🛍️Wilberries Parser Frequency Bot\nЭтот бот анализирует категории Wildberries и предоставляет статистику частоты поиска товаров.\n\nДоступные команды:\n/parse - Запросить анализ категории\n/parsing_from_excel - парсинг продуктов по эксель\n/list - Показать список админов (только для админов)";
 
-    // Получаем клавиатуру главного меню
-    const menuOptions = this.getMainMenu(userId);
-
-    await bot.sendMessage(userId, welcomeText, {
-      // parse_mode: "Markdown",
-      // ...this.getMainMenu(userId),
-      reply_markup: menuOptions.reply_markup,
+    await this.bot.sendMessage(userId, welcomeText, {
+      parse_mode: "Markdown",
+      ...this.getMainMenu(userId),
     });
   }
 
@@ -1378,7 +1363,7 @@ class BotHandlers {
     }
 
     const adminsList = adminIds.map((id) => `- ${id}`).join("\n");
-    await bot.sendMessage(userId, `📋 Список админов:\n${adminsList}`, {
+    await this.bot.sendMessage(userId, `📋 Список админов:\n${adminsList}`, {
       parse_mode: "Markdown",
       ...this.getMainMenu(userId),
     });
@@ -1390,23 +1375,23 @@ class BotHandlers {
       return this.handleUnauthorized(msg);
     }
 
-    this.waitingForUrl[userId] = "manual";
-    await bot.sendMessage(
+    this.waitingForUrl[userId] = true;
+    await this.bot.sendMessage(
       userId,
-      "🔗 Пожалуйста, отправьте URL категории Wildberries или поисковый запрос с фильтрами в формате:\n\n" +
-        "1. Для категории: https://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksessuary\n" +
-        "2. Для поиска: https://www.wildberries.ru/catalog/0/search.aspx?search=%D0%BC%D1%83%D0%B6%D1%81%D0%BA%D0%B8%D0%B5%20%D1%85%D1%83%D0%B4%D0%B8\n\n" +
-        "Поддерживаются все параметры фильтрации Wildberries (кроме page).",
-      { parse_mode: "Markdown", ...this.getUrlInputMenu() }
+      "🔗 Пожалуйста, отправьте одну или несколько ссылок Wildberries через пробелы:\n\nПример:\nhttps://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksessuary https://www.wildberries.ru/catalog/elektronika/avtoelektronika https://www.wildberries.ru/catalog/0/search.aspx?search=геймерское кресло",
+      {
+        parse_mode: "Markdown",
+        reply_markup: { remove_keyboard: true },
+      }
     );
   }
 
   async handleCancel(msg) {
     const userId = msg.from.id;
 
-    // Очищаем все состояния
     if (this.waitingForUrl[userId]) {
       delete this.waitingForUrl[userId];
+      delete this.userLinks[userId];
       await this.logService.log(
         `Парсинг по URL отменен пользователем ${userId}`
       );
@@ -1423,7 +1408,6 @@ class BotHandlers {
       await this.excelParser.cancelProcessing(userId);
     }
 
-    // Возвращаем в главное меню
     await this.showMainMenu(userId, "❌ Действие отменено");
   }
 
@@ -1431,7 +1415,6 @@ class BotHandlers {
     const text = message
       ? `${message}\n\nВыберите действие:`
       : "Выберите действие:";
-
     await this.bot.sendMessage(userId, text, {
       parse_mode: "Markdown",
       ...this.getMainMenu(userId),
@@ -1464,7 +1447,6 @@ class BotHandlers {
     if (!this.waitingForExcel[userId] || !msg.document) return;
 
     try {
-      // Проверяем расширение файла
       if (!msg.document.file_name.endsWith(".xlsx")) {
         throw new Error("Файл должен быть в формате .xlsx");
       }
@@ -1474,16 +1456,13 @@ class BotHandlers {
       await fs.mkdir(tempDir, { recursive: true });
       const filePath = path.join(tempDir, `${userId}_${fileId}.xlsx`);
 
-      // Скачиваем файл
       const file = await this.bot.getFile(fileId);
-      const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+      const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
       const response = await axios.get(fileUrl, {
         responseType: "arraybuffer",
       });
 
       await fs.writeFile(filePath, response.data);
-
-      // Обрабатываем файл
       await this.excelParser.handleExcelFile(userId, fileId, filePath);
     } catch (error) {
       await this.logService.log(
@@ -1509,50 +1488,75 @@ class BotHandlers {
 
     if (this.waitingForUrl[userId]) {
       if (this.parser.activeParsingUsers.has(userId)) {
-        await bot.sendMessage(
+        await this.bot.sendMessage(
           userId,
-          "⏳ Парсинг уже выполняется. Пожалуйста, дождитесь завершения текущего процесса.",
+          "⏳ Парсинг уже выполняется. Пожалуйста, дождитесь завершения.",
           { parse_mode: "Markdown" }
         );
         return;
       }
 
-      // Проверяем, что это URL Wildberries (категория или поиск)
-      if (!text.startsWith("https://www.wildberries.ru/catalog/")) {
-        await bot.sendMessage(
+      // Разбиваем текст на ссылки
+      const urls = text
+        .split(/\s+/)
+        .filter((url) => url.startsWith("https://www.wildberries.ru/catalog/"));
+
+      if (urls.length === 0) {
+        await this.bot.sendMessage(
           userId,
-          '❌ Ошибка: Неверный URL. Ссылка должна быть с сайта www.wildberries.ru и начинаться с "https://www.wildberries.ru/catalog/"',
-          { parse_mode: "Markdown", ...this.getUrlInputMenu() }
+          '❌ Не найдено валидных ссылок. Ссылки должны начинаться с "https://www.wildberries.ru/catalog/"',
+          { parse_mode: "Markdown" }
         );
-        return;
+        return this.showMainMenu(userId);
       }
 
-      await bot.sendMessage(
+      delete this.waitingForUrl[userId];
+
+      // Начинаем парсинг всех ссылок
+      await this.bot.sendMessage(
         userId,
-        "🔄 Запускаю анализ с учетом всех указанных фильтров...",
-        { reply_markup: { remove_keyboard: true } }
+        `🔄 Начинаю парсинг ${urls.length} ссылок...`,
+        { parse_mode: "Markdown" }
       );
 
-      try {
-        const success = await this.parser.parseUrl(text, userId);
-        await this.logService.clearLogMessages(userId);
-        delete this.waitingForUrl[userId];
+      for (let i = 0; i < urls.length; i++) {
+        const link = urls[i];
+        await this.bot.sendMessage(
+          userId,
+          `📌 Парсинг ссылки ${i + 1}/${urls.length}:\n${link}`,
+          { parse_mode: "Markdown" }
+        );
 
-        await bot.sendMessage(
+        const success = await this.parser.parseUrl(link, userId);
+        await this.logService.clearLogMessages(userId);
+
+        await this.bot.sendMessage(
           userId,
           success
-            ? "✅ Парсинг завершён."
-            : "❌ Ошибка: Не удалось выполнить парсинг.",
-          { parse_mode: "Markdown", ...this.getMainMenu(userId) }
+            ? `✅ Ссылка ${i + 1} успешно обработана`
+            : `❌ Ошибка при обработке ссылки ${i + 1}`,
+          { parse_mode: "Markdown" }
         );
-      } catch (error) {
-        await bot.sendMessage(
-          userId,
-          `❌ Ошибка при парсинге: ${error.message}`,
-          { parse_mode: "Markdown", ...this.getMainMenu(userId) }
-        );
-        delete this.waitingForUrl[userId];
+
+        // Пауза между запросами (кроме последней ссылки)
+        if (i < urls.length - 1) {
+          await this.bot.sendMessage(
+            userId,
+            "⏳ Ожидание 30 секунд перед следующей ссылкой...",
+            { parse_mode: "Markdown" }
+          );
+          await new Promise((resolve) => setTimeout(resolve, 30000));
+        }
       }
+
+      await this.bot.sendMessage(
+        userId,
+        `✅ Все ссылки обработаны (${urls.length})`,
+        {
+          parse_mode: "Markdown",
+          ...this.getMainMenu(userId),
+        }
+      );
     }
   }
 
@@ -1562,7 +1566,7 @@ class BotHandlers {
       `Unauthorized access attempt from user ${userId}`,
       "warning"
     );
-    await bot.sendMessage(userId, "❌ У вас нет доступа к этому боту.", {
+    await this.bot.sendMessage(userId, "❌ У вас нет доступа к этому боту.", {
       parse_mode: "Markdown",
     });
   }
