@@ -1378,7 +1378,7 @@ class BotHandlers {
     this.waitingForUrl[userId] = true;
     await this.bot.sendMessage(
       userId,
-      "🔗 Пожалуйста, отправьте одну или несколько ссылок Wildberries через пробелы:\n\nПример:\nhttps://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksessuary https://www.wildberries.ru/catalog/elektronika/avtoelektronika https://www.wildberries.ru/catalog/0/search.aspx?search=геймерское кресло",
+      "🔗 Пожалуйста, отправьте одну или несколько ссылок Wildberries через пробелы:\n\nПример:\nhttps://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksessuary https://www.wildberries.ru/catalog/elektronika/avtoelektronika https://www.wildberries.ru/catalog/0/search.aspx?search=геймерское+кресло",
       {
         parse_mode: "Markdown",
         reply_markup: { remove_keyboard: true },
