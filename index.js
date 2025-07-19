@@ -758,6 +758,7 @@ class WildberriesParser {
             shard: node.shard || null,
             url: node.url,
             query: node.query || null,
+            searchQuery: node.searchQuery || null,
           });
         }
 
@@ -1078,7 +1079,9 @@ class WildberriesParser {
   }
 
   async scrapeWbPage(page, category, userId) {
-    const url = `https://catalog.wb.ru/catalog/${category.shard}/catalog?appType=1&curr=rub&dest=-1257786&locale=ru&page=${page}&sort=popular&spp=0&${category.query}`;
+    console.log(category)
+    // const url = `https://catalog.wb.ru/catalog/${category.shard}/catalog?appType=1&curr=rub&dest=-1257786&locale=ru&page=${page}&sort=popular&spp=0&${category.query}`;
+    const url = `https://search.wb.ru/exactmatch/sng/common/v14/search?ab_testing=false&appType=1&curr=rub&dest=-1257786&hide_dtype=13;14&lang=ru&page=${page}&query=${category.searchQuery}&resultset=catalog&sort=popular&spp=30&suppressSpellcheck=false`;
     this.logService.log(`URL : ${url}`);
     const MAX_RETRIES = 6;
     let attempt = 0;
@@ -1086,7 +1089,7 @@ class WildberriesParser {
     while (attempt < MAX_RETRIES) {
       try {
         const response = await axios.get(url, { headers: this.headers });
-        const productsCount = response.data.data?.products?.length || 0;
+        const productsCount = response.data.products?.length || 0;
         const logMessage = `Страница ${page}: получено ${productsCount} товаров`;
         await this.logService.log(url);
         await this.logService.log(logMessage);
@@ -1147,7 +1150,7 @@ class WildberriesParser {
   }
 
   async processProducts(productsData) {
-    return (productsData.data?.products || [])
+    return (productsData.products || [])
       .filter((product) => "name" in product)
       .map((product) => this.fileService.normalizeProductName(product.name));
   }
