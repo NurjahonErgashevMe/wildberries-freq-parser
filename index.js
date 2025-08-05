@@ -182,6 +182,44 @@ class FileService {
     }
   }
 
+  async readLinksFromExcel(filePath, userId) {
+    // Уведомляем о начале обработки
+    await this.bot.sendMessage(userId, `👁 Читаю ссылки из файла...`, {
+      reply_markup: { remove_keyboard: true },
+    });
+    try {
+      const fileBuffer = await fs.readFile(filePath);
+      const workbook = xlsx.read(fileBuffer);
+      const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+      const data = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
+      
+      // Извлекаем ссылки из первого столбца (колонка A)
+      const links = [];
+      for (let i = 1; i < data.length; i++) { // Пропускаем заголовок
+        const cellValue = data[i][0];
+        if (cellValue && typeof cellValue === 'string' && 
+            cellValue.startsWith('https://www.wildberries.ru/catalog/')) {
+          links.push(cellValue.trim());
+        }
+      }
+      
+      // Удаляем дубликаты
+      const uniqueLinks = [...new Set(links)];
+      
+      await this.logService.log(
+        `Найдено ${links.length} ссылок, уникальных: ${uniqueLinks.length}`
+      );
+      
+      return uniqueLinks;
+    } catch (error) {
+      await this.logService.log(
+        `Error reading links from Excel file: ${error.message}`,
+        "error"
+      );
+      throw error;
+    }
+  }
+
   async updateExcelFile(filePath, data, updateField) {
     try {
       const fileBuffer = await fs.readFile(filePath);
@@ -1261,13 +1299,15 @@ class WildberriesParser {
 }
 
 class BotHandlers {
-  constructor(bot, parser, logService, excelParser) {
+  constructor(bot, parser, logService, excelParser, fileService) {
     this.bot = bot;
     this.parser = parser;
     this.logService = logService;
     this.excelParser = excelParser;
+    this.fileService = fileService;
     this.waitingForUrl = {};
     this.waitingForExcel = {};
+    this.waitingForLinksFile = {};
     // this.userLinks = {};
   }
 
@@ -1313,6 +1353,8 @@ class BotHandlers {
         if (text === "Парсить") return this.manualParse(msg);
         if (text === "Парсить Excel") return this.startExcelParse(msg);
         if (text === "Список подписчиков") return this.listAdmins(msg);
+        if (text === "Ввести ссылки текстом") return this.startTextLinkInput(msg);
+        if (text === "Загрузить Excel со ссылками") return this.startLinksFileUpload(msg);
         if (this.waitingForUrl[userId]) return this.handleText(msg);
       }
     });
@@ -1378,6 +1420,32 @@ class BotHandlers {
       return this.handleUnauthorized(msg);
     }
 
+    const keyboard = {
+      keyboard: [
+        ["Ввести ссылки текстом"],
+        ["Загрузить Excel со ссылками"],
+        ["Отмена"]
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: true,
+    };
+
+    await this.bot.sendMessage(
+      userId,
+      "🔗 Выберите способ добавления ссылок для парсинга:",
+      {
+        parse_mode: "Markdown",
+        reply_markup: keyboard,
+      }
+    );
+  }
+
+  async startTextLinkInput(msg) {
+    const userId = msg.from.id;
+    if (!adminIds.includes(userId)) {
+      return this.handleUnauthorized(msg);
+    }
+
     this.waitingForUrl[userId] = true;
     await this.bot.sendMessage(
       userId,
@@ -1387,6 +1455,110 @@ class BotHandlers {
         reply_markup: { remove_keyboard: true },
       }
     );
+  }
+
+  async startLinksFileUpload(msg) {
+    const userId = msg.from.id;
+    if (!adminIds.includes(userId)) {
+      return this.handleUnauthorized(msg);
+    }
+
+    this.waitingForLinksFile[userId] = true;
+    await this.bot.sendMessage(
+      userId,
+      "📁 Пожалуйста, отправьте Excel файл со ссылками.\n\n📋 Формат файла:\n• Ссылки должны быть в первом столбце (колонка A)\n• Первая строка - заголовок (будет пропущена)\n• Ссылки должны начинаться с https://www.wildberries.ru/catalog/\n• Дубликаты будут автоматически удалены",
+      {
+        parse_mode: "Markdown",
+        reply_markup: { remove_keyboard: true },
+      }
+    );
+  }
+
+  async handleLinksFile(userId, filePath) {
+    try {
+      if (this.parser.activeParsingUsers.has(userId)) {
+        await this.bot.sendMessage(
+          userId,
+          "⏳ Парсинг уже выполняется. Пожалуйста, дождитесь завершения.",
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+
+      // Читаем ссылки из Excel файла
+      const urls = await this.fileService.readLinksFromExcel(filePath, userId);
+
+      if (urls.length === 0) {
+        await this.bot.sendMessage(
+          userId,
+          '❌ Не найдено валидных ссылок в файле. Ссылки должны быть в первом столбце и начинаться с "https://www.wildberries.ru/catalog/"',
+          { parse_mode: "Markdown" }
+        );
+        return this.showMainMenu(userId);
+      }
+
+      delete this.waitingForLinksFile[userId];
+
+      // Начинаем парсинг всех ссылок
+      await this.bot.sendMessage(
+        userId,
+        `🔄 Начинаю парсинг ${urls.length} ссылок из файла...`,
+        { parse_mode: "Markdown" }
+      );
+
+      for (let i = 0; i < urls.length; i++) {
+        const link = urls[i];
+        await this.bot.sendMessage(
+          userId,
+          `📌 Парсинг ссылки ${i + 1}/${urls.length}:\n${link}`,
+          { parse_mode: "Markdown" }
+        );
+
+        const success = await this.parser.parseUrl(link, userId);
+        await this.logService.clearLogMessages(userId);
+
+        await this.bot.sendMessage(
+          userId,
+          success
+            ? `✅ Ссылка ${i + 1} успешно обработана`
+            : `❌ Ошибка при обработке ссылки ${i + 1}`,
+          { parse_mode: "Markdown" }
+        );
+
+        // Пауза между запросами (кроме последней ссылки)
+        if (i < urls.length - 1) {
+          await this.bot.sendMessage(
+            userId,
+            "⏳ Ожидание 30 секунд перед следующей ссылкой...",
+            { parse_mode: "Markdown" }
+          );
+          await new Promise((resolve) => setTimeout(resolve, 30000));
+        }
+      }
+
+      await this.bot.sendMessage(
+        userId,
+        `🎉 Парсинг завершен! Обработано ${urls.length} ссылок.`,
+        { parse_mode: "Markdown", ...this.getMainMenu(userId) }
+      );
+    } catch (error) {
+      await this.logService.log(
+        `Error handling links file: ${error.message}`,
+        "error"
+      );
+      await this.bot.sendMessage(
+        userId,
+        `❌ Ошибка при обработке файла со ссылками: ${error.message}`,
+        { parse_mode: "Markdown", ...this.getMainMenu(userId) }
+      );
+    } finally {
+      // Удаляем временный файл
+      try {
+        await fs.unlink(filePath);
+      } catch (e) {
+        await this.logService.log(`Error deleting file: ${e.message}`, "error");
+      }
+    }
   }
 
   async handleCancel(msg) {
@@ -1404,6 +1576,13 @@ class BotHandlers {
       delete this.waitingForExcel[userId];
       await this.logService.log(
         `Парсинг Excel отменен пользователем ${userId}`
+      );
+    }
+
+    if (this.waitingForLinksFile[userId]) {
+      delete this.waitingForLinksFile[userId];
+      await this.logService.log(
+        `Загрузка файла со ссылками отменена пользователем ${userId}`
       );
     }
 
@@ -1447,7 +1626,7 @@ class BotHandlers {
 
   async handleDocument(msg) {
     const userId = msg.from.id;
-    if (!this.waitingForExcel[userId] || !msg.document) return;
+    if ((!this.waitingForExcel[userId] && !this.waitingForLinksFile[userId]) || !msg.document) return;
 
     try {
       if (!msg.document.file_name.endsWith(".xlsx")) {
@@ -1466,7 +1645,13 @@ class BotHandlers {
       });
 
       await fs.writeFile(filePath, response.data);
-      await this.excelParser.handleExcelFile(userId, fileId, filePath);
+
+      // Обрабатываем файл в зависимости от типа ожидания
+      if (this.waitingForExcel[userId]) {
+        await this.excelParser.handleExcelFile(userId, fileId, filePath);
+      } else if (this.waitingForLinksFile[userId]) {
+        await this.handleLinksFile(userId, filePath);
+      }
     } catch (error) {
       await this.logService.log(
         `Error handling document: ${error.message}`,
@@ -1478,6 +1663,7 @@ class BotHandlers {
         { parse_mode: "Markdown", ...this.getMainMenu(userId) }
       );
       delete this.waitingForExcel[userId];
+      delete this.waitingForLinksFile[userId];
     }
   }
 
@@ -1500,17 +1686,28 @@ class BotHandlers {
       }
 
       // Разбиваем текст на ссылки
-      const urls = text
+      const allUrls = text
         .split(/\s+/)
         .filter((url) => url.startsWith("https://www.wildberries.ru/catalog/"));
 
-      if (urls.length === 0) {
+      if (allUrls.length === 0) {
         await this.bot.sendMessage(
           userId,
           '❌ Не найдено валидных ссылок. Ссылки должны начинаться с "https://www.wildberries.ru/catalog/"',
           { parse_mode: "Markdown" }
         );
         return this.showMainMenu(userId);
+      }
+
+      // Удаляем дубликаты
+      const urls = [...new Set(allUrls)];
+      
+      if (allUrls.length !== urls.length) {
+        await this.bot.sendMessage(
+          userId,
+          `📋 Найдено ${allUrls.length} ссылок, уникальных: ${urls.length}`,
+          { parse_mode: "Markdown" }
+        );
       }
 
       delete this.waitingForUrl[userId];
@@ -1589,7 +1786,8 @@ const botHandlers = new BotHandlers(
   bot,
   wildberriesParser,
   logService,
-  excelParser
+  excelParser,
+  fileService
 );
 
 // Инициализация директорий при старте
