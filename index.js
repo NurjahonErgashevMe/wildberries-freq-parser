@@ -149,7 +149,6 @@ class FileService {
     this.DELETE_FILE_TIMEOUT = 15000; // 15 seconds
   }
 
-  // Добавьте этот метод в класс FileService
   normalizeProductName(name) {
     if (!name || typeof name !== "string") return name;
 
@@ -192,24 +191,28 @@ class FileService {
       const workbook = xlsx.read(fileBuffer);
       const worksheet = workbook.Sheets[workbook.SheetNames[0]];
       const data = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
-      
+
       // Извлекаем ссылки из первого столбца (колонка A)
       const links = [];
-      for (let i = 1; i < data.length; i++) { // Пропускаем заголовок
+      for (let i = 1; i < data.length; i++) {
+        // Пропускаем заголовок
         const cellValue = data[i][0];
-        if (cellValue && typeof cellValue === 'string' && 
-            cellValue.startsWith('https://www.wildberries.ru/catalog/')) {
+        if (
+          cellValue &&
+          typeof cellValue === "string" &&
+          cellValue.startsWith("https://www.wildberries.ru/catalog/")
+        ) {
           links.push(cellValue.trim());
         }
       }
-      
+
       // Удаляем дубликаты
       const uniqueLinks = [...new Set(links)];
-      
+
       await this.logService.log(
         `Найдено ${links.length} ссылок, уникальных: ${uniqueLinks.length}`
       );
-      
+
       return uniqueLinks;
     } catch (error) {
       await this.logService.log(
@@ -552,12 +555,13 @@ class EvirmaClient {
 }
 
 class ExcelParser {
-  constructor(bot, fileService, evirmaClient, logService) {
+  constructor(bot, fileService, evirmaClient, logService, botHandlers = null) {
     this.bot = bot;
     this.fileService = fileService;
     this.evirmaClient = evirmaClient;
     this.logService = logService;
     this.userStates = {};
+    this.botHandlers = botHandlers;
   }
 
   async handleExcelFile(userId, fileId, filePath) {
@@ -694,12 +698,17 @@ class ExcelParser {
         userId
       );
 
-      // Уведомляем о завершении
+      // Уведомляем о завершении и показываем меню парсинга
       await this.bot.sendMessage(
         userId,
         `✅ ${choice} успешно завершено!\nОбработано товаров: ${names.length}`,
         { parse_mode: "Markdown" }
       );
+
+      // Возвращаемся в меню парсинга
+      setTimeout(() => {
+        this.showParsingMenu(userId);
+      }, 1000);
     } catch (error) {
       if (error.response && error.response.statusCode === 429) {
         const retryAfter = error?.response.body.parameters.retry_after || 10; // По умолчанию 10 секунд
@@ -721,6 +730,11 @@ class ExcelParser {
         `Excel processing error: ${error.message}`,
         "error"
       );
+
+      // Возвращаемся в меню парсинга даже при ошибке
+      setTimeout(() => {
+        this.showParsingMenu(userId);
+      }, 1000);
     } finally {
       // Очищаем состояние
       // delete this.userStates[userId];
@@ -1117,7 +1131,7 @@ class WildberriesParser {
   }
 
   async scrapeWbPage(page, category, userId) {
-    console.log(category)
+    console.log(category);
     // const url = `https://catalog.wb.ru/catalog/${category.shard}/catalog?appType=1&curr=rub&dest=-1257786&locale=ru&page=${page}&sort=popular&spp=0&${category.query}`;
     const url = `https://search.wb.ru/exactmatch/sng/common/v14/search?ab_testing=false&appType=1&curr=rub&dest=-1257786&hide_dtype=13;14&lang=ru&page=${page}&query=${category.searchQuery}&resultset=catalog&sort=popular&spp=30&suppressSpellcheck=false`;
     this.logService.log(`URL : ${url}`);
@@ -1353,8 +1367,10 @@ class BotHandlers {
         if (text === "Парсить") return this.manualParse(msg);
         if (text === "Парсить Excel") return this.startExcelParse(msg);
         if (text === "Список подписчиков") return this.listAdmins(msg);
-        if (text === "Ввести ссылки текстом") return this.startTextLinkInput(msg);
-        if (text === "Загрузить Excel со ссылками") return this.startLinksFileUpload(msg);
+        if (text === "Ввести ссылки текстом")
+          return this.startTextLinkInput(msg);
+        if (text === "Загрузить Excel со ссылками")
+          return this.startLinksFileUpload(msg);
         if (this.waitingForUrl[userId]) return this.handleText(msg);
       }
     });
@@ -1371,6 +1387,18 @@ class BotHandlers {
   getMainMenu(userId) {
     return {
       keyboard: [["Парсить"], ["Парсить Excel"]],
+      resize_keyboard: true,
+      one_time_keyboard: true,
+    };
+  }
+
+  getParsingMenu() {
+    return {
+      keyboard: [
+        ["Ввести ссылки текстом"],
+        ["Загрузить Excel со ссылками"],
+        ["Отмена"],
+      ],
       resize_keyboard: true,
       one_time_keyboard: true,
     };
@@ -1397,7 +1425,7 @@ class BotHandlers {
 
     await this.bot.sendMessage(userId, welcomeText, {
       parse_mode: "Markdown",
-      ...this.getMainMenu(userId),
+      reply_markup: this.getMainMenu(userId),
     });
   }
 
@@ -1410,7 +1438,7 @@ class BotHandlers {
     const adminsList = adminIds.map((id) => `- ${id}`).join("\n");
     await this.bot.sendMessage(userId, `📋 Список админов:\n${adminsList}`, {
       parse_mode: "Markdown",
-      ...this.getMainMenu(userId),
+      reply_markup: this.getMainMenu(userId),
     });
   }
 
@@ -1424,7 +1452,7 @@ class BotHandlers {
       keyboard: [
         ["Ввести ссылки текстом"],
         ["Загрузить Excel со ссылками"],
-        ["Отмена"]
+        ["Отмена"],
       ],
       resize_keyboard: true,
       one_time_keyboard: true,
@@ -1452,7 +1480,11 @@ class BotHandlers {
       "🔗 Пожалуйста, отправьте одну или несколько ссылок Wildberries через пробелы:\n\nПример:\nhttps://www.wildberries.ru/catalog/dom-i-dacha/vannaya/aksessuary https://www.wildberries.ru/catalog/elektronika/avtoelektronika https://www.wildberries.ru/catalog/0/search.aspx?search=геймерское+кресло",
       {
         parse_mode: "Markdown",
-        reply_markup: { remove_keyboard: true },
+        reply_markup: {
+          keyboard: [["Отмена"]],
+          resize_keyboard: true,
+          one_time_keyboard: true,
+        },
       }
     );
   }
@@ -1469,7 +1501,11 @@ class BotHandlers {
       "📁 Пожалуйста, отправьте Excel файл со ссылками.\n\n📋 Формат файла:\n• Ссылки должны быть в первом столбце (колонка A)\n• Первая строка - заголовок (будет пропущена)\n• Ссылки должны начинаться с https://www.wildberries.ru/catalog/\n• Дубликаты будут автоматически удалены",
       {
         parse_mode: "Markdown",
-        reply_markup: { remove_keyboard: true },
+        reply_markup: {
+          keyboard: [["Отмена"]],
+          resize_keyboard: true,
+          one_time_keyboard: true,
+        },
       }
     );
   }
@@ -1494,7 +1530,7 @@ class BotHandlers {
           '❌ Не найдено валидных ссылок в файле. Ссылки должны быть в первом столбце и начинаться с "https://www.wildberries.ru/catalog/"',
           { parse_mode: "Markdown" }
         );
-        return this.showMainMenu(userId);
+        return this.showParsingMenu(userId);
       }
 
       delete this.waitingForLinksFile[userId];
@@ -1539,8 +1575,13 @@ class BotHandlers {
       await this.bot.sendMessage(
         userId,
         `🎉 Парсинг завершен! Обработано ${urls.length} ссылок.`,
-        { parse_mode: "Markdown", ...this.getMainMenu(userId) }
+        { parse_mode: "Markdown" }
       );
+
+      // Возвращаемся в меню парсинга
+      // setTimeout(() => {
+      // }, 1000);
+      this.showParsingMenu(userId);
     } catch (error) {
       await this.logService.log(
         `Error handling links file: ${error.message}`,
@@ -1549,8 +1590,13 @@ class BotHandlers {
       await this.bot.sendMessage(
         userId,
         `❌ Ошибка при обработке файла со ссылками: ${error.message}`,
-        { parse_mode: "Markdown", ...this.getMainMenu(userId) }
+        { parse_mode: "Markdown" }
       );
+
+      // Возвращаемся в меню парсинга даже при ошибке
+      // setTimeout(() => {
+      // }, 1000);
+        this.showParsingMenu(userId);
     } finally {
       // Удаляем временный файл
       try {
@@ -1564,12 +1610,13 @@ class BotHandlers {
   async handleCancel(msg) {
     const userId = msg.from.id;
 
+    // Если пользователь в процессе ввода ссылок - возвращаем в меню парсинга
     if (this.waitingForUrl[userId]) {
       delete this.waitingForUrl[userId];
-      delete this.userLinks[userId];
       await this.logService.log(
         `Парсинг по URL отменен пользователем ${userId}`
       );
+      return this.showParsingMenu(userId, "❌ Ввод ссылок отменен");
     }
 
     if (this.waitingForExcel[userId]) {
@@ -1577,6 +1624,7 @@ class BotHandlers {
       await this.logService.log(
         `Парсинг Excel отменен пользователем ${userId}`
       );
+      return this.showMainMenu(userId, "❌ Действие отменено");
     }
 
     if (this.waitingForLinksFile[userId]) {
@@ -1584,12 +1632,15 @@ class BotHandlers {
       await this.logService.log(
         `Загрузка файла со ссылками отменена пользователем ${userId}`
       );
+      return this.showParsingMenu(userId, "❌ Загрузка файла отменена");
     }
 
     if (this.excelParser.userStates[userId]) {
       await this.excelParser.cancelProcessing(userId);
+      return this.showMainMenu(userId, "❌ Действие отменено");
     }
 
+    // Если отмена из меню парсинга - возвращаем в главное меню
     await this.showMainMenu(userId, "❌ Действие отменено");
   }
 
@@ -1599,7 +1650,17 @@ class BotHandlers {
       : "Выберите действие:";
     await this.bot.sendMessage(userId, text, {
       parse_mode: "Markdown",
-      ...this.getMainMenu(userId),
+      reply_markup: this.getMainMenu(userId),
+    });
+  }
+
+  async showParsingMenu(userId, message = "") {
+    const text = message
+      ? `${message}\n\n🔗 Выберите способ добавления ссылок для парсинга:`
+      : "🔗 Выберите способ добавления ссылок для парсинга:";
+    await this.bot.sendMessage(userId, text, {
+      parse_mode: "Markdown",
+      reply_markup: this.getParsingMenu(),
     });
   }
 
@@ -1626,7 +1687,11 @@ class BotHandlers {
 
   async handleDocument(msg) {
     const userId = msg.from.id;
-    if ((!this.waitingForExcel[userId] && !this.waitingForLinksFile[userId]) || !msg.document) return;
+    if (
+      (!this.waitingForExcel[userId] && !this.waitingForLinksFile[userId]) ||
+      !msg.document
+    )
+      return;
 
     try {
       if (!msg.document.file_name.endsWith(".xlsx")) {
@@ -1660,7 +1725,10 @@ class BotHandlers {
       await this.bot.sendMessage(
         userId,
         `❌ Ошибка: ${error.message}\nПожалуйста, попробуйте еще раз.`,
-        { parse_mode: "Markdown", ...this.getMainMenu(userId) }
+        {
+          parse_mode: "Markdown",
+          reply_markup: this.getMainMenu(userId),
+        }
       );
       delete this.waitingForExcel[userId];
       delete this.waitingForLinksFile[userId];
@@ -1696,12 +1764,12 @@ class BotHandlers {
           '❌ Не найдено валидных ссылок. Ссылки должны начинаться с "https://www.wildberries.ru/catalog/"',
           { parse_mode: "Markdown" }
         );
-        return this.showMainMenu(userId);
+        return this.showParsingMenu(userId);
       }
 
       // Удаляем дубликаты
       const urls = [...new Set(allUrls)];
-      
+
       if (allUrls.length !== urls.length) {
         await this.bot.sendMessage(
           userId,
@@ -1752,11 +1820,13 @@ class BotHandlers {
       await this.bot.sendMessage(
         userId,
         `✅ Все ссылки обработаны (${urls.length})`,
-        {
-          parse_mode: "Markdown",
-          ...this.getMainMenu(userId),
-        }
+        { parse_mode: "Markdown" }
       );
+
+      // Возвращаемся в меню парсинга
+      setTimeout(() => {
+        this.showParsingMenu(userId);
+      }, 1000);
     }
   }
 
@@ -1789,6 +1859,9 @@ const botHandlers = new BotHandlers(
   excelParser,
   fileService
 );
+
+// Устанавливаем ссылку на botHandlers в excelParser
+excelParser.botHandlers = botHandlers;
 
 // Инициализация директорий при старте
 ensureDirsExist();
