@@ -535,18 +535,29 @@ class EvirmaClient {
       evirmaData.data.keywords
     )) {
       const normalizedKeyword = this.fileService.normalizeProductName(keyword);
-      // Skip if cluster is null or counts are 0
+      // Skip if cluster is null or freq is 0
       if (
         !keywordData.cluster ||
-        !keywordData.cluster.product_count ||
         !keywordData.cluster.freq_syn?.monthly
       ) {
         continue;
       }
 
+      // Get correct product count from Wildberries API
+      let productCount = keywordData.cluster.product_count || 0;
+      try {
+        const wbUrl = `https://u-search.wb.ru/exactmatch/sng/common/v18/search?ab_testing=false&appType=1&autoselectFilters=false&curr=rub&dest=494&hide_dflags=131072&hide_dtype=11&inheritFilters=false&lang=ru&query=${encodeURIComponent(keywordData.cluster.keyword)}&resultset=filters&spp=30&suppressSpellcheck=false`;
+        const wbResponse = await axios.get(wbUrl, { headers: this.headers });
+        if (wbResponse.data?.data?.total) {
+          productCount = wbResponse.data.data.total;
+        }
+      } catch (error) {
+        await this.logService.log(`Failed to get WB count for ${keyword}: ${error.message}`, "warning");
+      }
+
       parsedData.push({
         Название: normalizedKeyword,
-        "Количество товара": keywordData.cluster.product_count,
+        "Количество товара": productCount,
         "Частота товара": keywordData.cluster.freq_syn.monthly,
       });
     }
