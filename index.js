@@ -546,7 +546,7 @@ class EvirmaClient {
       // Get correct product count from Wildberries API
       let productCount = keywordData.cluster.product_count || 0;
       try {
-        const wbUrl = `https://u-search.wb.ru/exactmatch/sng/common/v18/search?ab_testing=false&appType=1&autoselectFilters=false&curr=rub&dest=494&hide_dflags=131072&hide_dtype=11&inheritFilters=false&lang=ru&query=${encodeURIComponent(keywordData.cluster.keyword)}&resultset=filters&spp=30&suppressSpellcheck=false`;
+        const wbUrl = `https://u-search.wb.ru/exactmatch/ru/common/v18/search?ab_testing=false&ab_testing=false&appType=1&autoselectFilters=false&curr=rub&dest=-1257786&hide_dflags=131072&hide_dtype=11&inheritFilters=false&lang=ru&query=${encodeURIComponent(keywordData.cluster.keyword)}&resultset=filters&spp=30&suppressSpellcheck=false`;
         const wbResponse = await axios.get(wbUrl, { headers: this.headers });
         if (wbResponse.data?.data?.total) {
           productCount = wbResponse.data.data.total;
@@ -885,7 +885,7 @@ class WildberriesParser {
     const encodedQuery = encodeURIComponent(query);
 
     // Базовый URL поиска
-    let url = `https://search.wb.ru/exactmatch/sng/common/v13/search?ab_testing=false&appType=1&curr=rub&dest=-1257786&lang=ru&page=${page}&query=${encodedQuery}&resultset=catalog&sort=popular&spp=0`;
+    let url = `https://u-search.wb.ru/exactmatch/ru/common/v18/search?ab_testing=false&ab_testing=false&appType=1&curr=rub&dest=-1257786&hide_dtype=11&inheritFilters=false&lang=ru&page=${page}&query=${encodedQuery}&resultset=catalog&sort=popular&spp=30&suppressSpellcheck=false`;
 
     // Добавляем все параметры фильтрации
     for (const [key, value] of Object.entries(filters)) {
@@ -899,7 +899,7 @@ class WildberriesParser {
     while (attempt < MAX_RETRIES) {
       try {
         const response = await axios.get(url, { headers: this.headers });
-        const productsCount = response.data.data?.products?.length || 0;
+        const productsCount = response.data.products?.length || 0;
         const logMessage = `Страница поиска ${page}: получено ${productsCount} товаров`;
         await this.logService.log(logMessage);
 
@@ -1144,7 +1144,7 @@ class WildberriesParser {
   async scrapeWbPage(page, category, userId) {
     console.log(category);
     // const url = `https://catalog.wb.ru/catalog/${category.shard}/catalog?appType=1&curr=rub&dest=-1257786&locale=ru&page=${page}&sort=popular&spp=0&${category.query}`;
-    const url = `https://search.wb.ru/exactmatch/sng/common/v14/search?ab_testing=false&appType=1&curr=rub&dest=-1257786&hide_dtype=13;14&lang=ru&page=${page}&query=${category.searchQuery}&resultset=catalog&sort=popular&spp=30&suppressSpellcheck=false`;
+    const url = `https://u-search.wb.ru/exactmatch/ru/common/v18/search?ab_testing=false&ab_testing=false&appType=1&curr=rub&dest=-1257786&hide_dtype=11&inheritFilters=false&lang=ru&page=${page}&query=${category.searchQuery}&resultset=catalog&sort=popular&spp=30&suppressSpellcheck=false`;
     this.logService.log(`URL : ${url}`);
     const MAX_RETRIES = 6;
     let attempt = 0;
