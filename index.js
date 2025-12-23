@@ -6,6 +6,7 @@ const path = require("path");
 const xlsx = require("xlsx");
 const dotenv = require("dotenv");
 const { default: PQueue } = require("p-queue");
+const puppeteer = require("puppeteer");
 
 // Создаем Express приложение
 const app = express();
@@ -391,8 +392,97 @@ class EvirmaClient {
       Accept: "application/json",
       "Content-Type": "application/json",
     };
-    this.TIMEOUT = 30000; // 30 секунд
+    this.wbHeaders = null;
+    this.cookieExpiry = null;
+    this.TIMEOUT = 30000;
     this.logService = logService;
+  }
+
+  async getWbHeaders(forceRefresh = false) {
+    // Проверяем, есть ли валидные куки (обновляем каждые 10 минут или принудительно)
+    if (!forceRefresh && this.wbHeaders && this.cookieExpiry && Date.now() < this.cookieExpiry) {
+      return this.wbHeaders;
+    }
+
+    try {
+      const browser = await puppeteer.launch({ 
+        headless: true, 
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-blink-features=AutomationControlled'
+        ]
+      });
+      const page = await browser.newPage();
+      
+      // Устанавливаем реалистичные заголовки браузера
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+      await page.setExtraHTTPHeaders({
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+      });
+      
+      // Переходим на главную страницу и ждем загрузки
+      await page.goto('https://www.wildberries.ru/', { 
+        waitUntil: 'networkidle2',
+        timeout: 30000
+      });
+      
+      // Ждем немного, чтобы браузер выполнил все скрипты
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Получаем cookies
+      const cookies = await page.cookies();
+      const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+      
+      // Получаем User-Agent из браузера
+      const userAgent = await page.evaluate(() => navigator.userAgent);
+      
+      await browser.close();
+
+      // Формируем полные headers с реальными cookies
+      this.wbHeaders = {
+        "User-Agent": userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "x-requested-with": "XMLHttpRequest",
+        "Referer": "https://www.wildberries.ru/",
+        "Origin": "https://www.wildberries.ru",
+        "Cookie": cookieString
+      };
+      
+      // Обновляем headers каждые 10 минут (уменьшили с 30)
+      this.cookieExpiry = Date.now() + 10 * 60 * 1000;
+      await this.logService.log('WB headers refreshed');
+      
+      return this.wbHeaders;
+    } catch (error) {
+      await this.logService.log(`Failed to get WB headers: ${error.message}`, 'error');
+      // Fallback к статичным headers (но это не идеально)
+      return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "x-requested-with": "XMLHttpRequest",
+        "Referer": "https://www.wildberries.ru/",
+        "Origin": "https://www.wildberries.ru",
+        "Cookie": "x_wbaas_token=1.1000.c8cfab507e764bc5ab9230eca22f725c.MHw4Mi4yMTUuOTguNjR8TW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzE0My4wLjAuMCBTYWZhcmkvNTM3LjM2fDE3NjcxODY1ODV8cmV1c2FibGV8MnxleUpvWVhOb0lqb2lJbjA9fDB8M3wxNzY2NTgxNzg1fDE=.MEQCIBqJxkDlWYDttrGzdMZcC115YOupV+2Dqk7HTxXx46/+AiA8SbgiO1nFhdEfn0n3gn3VNwKYN0f4IFn9uvUqZhBWlQ==; _wbauid=1208259471765976988; __zzatw-wb=MDA0dBA=Fz2+aQ==; cfidsw-wb=hhQHd2ZAKcmtRMUifKbq3/Zav2CFeehQ1560YSnmoon0GcMYDrypp/HJJzZ2avDr5ojJchoL/0Wxd90vWO3JIIRGF622mcqLVZHdvA88OLTfPHd7SpCrY6YqbFgeG76Lc+GM+UpyRY/S9kvXnyN20eemT6QLAC3rSNaV"
+      };
+    }
   }
 
   async processExcelData(names, fieldToUpdate, progressCallback, userId) {
@@ -545,14 +635,44 @@ class EvirmaClient {
 
       // Get correct product count from Wildberries API
       let productCount = keywordData.cluster.product_count || 0;
+
+      // https://www.wildberries.ru/__internal/u-search/exactmatch/sng/common/v18/search?ab_testing=false&appType=1&curr=rub&dest=494&hide_dtype=9%3B11&hide_vflags=4294967296&inheritFilters=false&lang=ru&page=1&query=%D0%BA%D0%BB%D0%B0%D0%B2%D0%B8%D0%B0%D1%82%D1%83%D1%80%D1%8B+%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5&resultset=catalog&sort=popular&spp=30&suppressSpellcheck=false
+
       try {
-        const wbUrl = `https://u-search.wb.ru/exactmatch/ru/common/v18/search?ab_testing=false&ab_testing=false&appType=1&autoselectFilters=false&curr=rub&dest=-1257786&hide_dflags=131072&hide_dtype=11&inheritFilters=false&lang=ru&query=${encodeURIComponent(keywordData.cluster.keyword)}&resultset=filters&spp=30&suppressSpellcheck=false`;
-        const wbResponse = await axios.get(wbUrl, { headers: this.headers });
-        if (wbResponse.data?.data?.total) {
-          productCount = wbResponse.data.data.total;
+        const wbUrl = `https://www.wildberries.ru/__internal/u-search/exactmatch/sng/common/v18/search?ab_testing=false&appType=1&autoselectFilters=false&curr=rub&dest=494&hide_dflags=131072&hide_dtype=9%3B11&hide_vflags=4294967296&lang=ru&query=${encodeURIComponent(keywordData.cluster.keyword)}&resultset=filters&spp=30&suppressSpellcheck=false`;
+        
+        let headers = await this.getWbHeaders();
+        let retryCount = 0;
+        const MAX_RETRIES = 2;
+        
+        while (retryCount <= MAX_RETRIES) {
+          try {
+            const wbResponse = await axios.get(wbUrl, { 
+              headers,
+              timeout: 10000
+            });
+            if (wbResponse.data?.data?.total) {
+              productCount = wbResponse.data.data.total;
+            }
+            break; // Успешно получили данные
+          } catch (error) {
+            // Если ошибка 498 или 403 - обновляем headers и повторяем
+            if ((error.response?.status === 498 || error.response?.status === 403) && retryCount < MAX_RETRIES) {
+              await this.logService.log(`Got ${error.response.status} for ${keyword}, refreshing headers...`, "warning");
+              headers = await this.getWbHeaders(true); // Принудительно обновляем headers
+              retryCount++;
+              await new Promise(resolve => setTimeout(resolve, 2000)); // Небольшая задержка
+              continue;
+            }
+            // Если это не 498/403 или превышены попытки - просто логируем и используем значение по умолчанию
+            if (error.response?.status !== 498 && error.response?.status !== 403) {
+              await this.logService.log(`Failed to get WB count for ${keyword}: ${error.message}`, "warning");
+            }
+            break;
+          }
         }
       } catch (error) {
-        await this.logService.log(`Failed to get WB count for ${keyword}: ${error.message}`, "warning");
+        // Игнорируем ошибки, используем значение по умолчанию
       }
 
       parsedData.push({
@@ -776,18 +896,25 @@ class WildberriesParser {
     this.logService = logService;
     this.catalogData = null;
     this.results = [];
-    this.headers = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    };
+    this.headers = null; // Будет обновляться динамически
     this.MAX_PAGES = 50;
     this.activeParsingUsers = new Set();
     this.RETRY_WAIT_TIME = 30000; // 30 секунд
   }
 
+  async updateHeaders() {
+    // Получаем свежие headers через evirmaClient
+    this.headers = await this.evirmaClient.getWbHeaders(true);
+    await this.logService.log('WildberriesParser headers updated');
+  }
+
   async fetchWbCatalog() {
     try {
+      // Убеждаемся, что headers обновлены
+      if (!this.headers) {
+        await this.updateHeaders();
+      }
+      
       const response = await axios.get(
         "https://static-basket-01.wbbasket.ru/vol0/data/main-menu-ru-ru-v3.json",
         { headers: this.headers }
@@ -885,7 +1012,7 @@ class WildberriesParser {
     const encodedQuery = encodeURIComponent(query);
 
     // Базовый URL поиска
-    let url = `https://u-search.wb.ru/exactmatch/ru/common/v18/search?ab_testing=false&ab_testing=false&appType=1&curr=rub&dest=-1257786&hide_dtype=11&inheritFilters=false&lang=ru&page=${page}&query=${encodedQuery}&resultset=catalog&sort=popular&spp=30&suppressSpellcheck=false`;
+    let url = `https://www.wildberries.ru/__internal/u-search/exactmatch/sng/common/v18/search?ab_testing=false&appType=1&autoselectFilters=false&curr=rub&dest=494&hide_dflags=131072&hide_dtype=9%3B11&hide_vflags=4294967296&lang=ru&page=${page}&query=${encodedQuery}&resultset=catalog&sort=popular&spp=30&suppressSpellcheck=false`;
 
     // Добавляем все параметры фильтрации
     for (const [key, value] of Object.entries(filters)) {
@@ -895,6 +1022,11 @@ class WildberriesParser {
     await this.logService.log(`Search URL: ${url}`);
     const MAX_RETRIES = 6;
     let attempt = 0;
+
+    // Убеждаемся, что headers обновлены
+    if (!this.headers) {
+      await this.updateHeaders();
+    }
 
     while (attempt < MAX_RETRIES) {
       try {
@@ -914,6 +1046,15 @@ class WildberriesParser {
         return { data: response.data, logMessage };
       } catch (error) {
         attempt++;
+        
+        // Обработка ошибки 498 или 403 - обновляем headers
+        if (error.response && (error.response.status === 498 || error.response.status === 403)) {
+          await this.logService.log(`Got ${error.response.status} for page ${page}, refreshing headers...`, "warning");
+          await this.updateHeaders();
+          await new Promise((resolve) => setTimeout(resolve, 3000)); // Задержка перед повтором
+          continue;
+        }
+        
         if (error.response && error.response.status === 429) {
           const retryMessage = `ℹ️ Возникла ошибка с лимитом Wildberries, отправим через ${
             this.RETRY_WAIT_TIME / 1000
@@ -974,6 +1115,9 @@ class WildberriesParser {
     this.results = [];
 
     try {
+      // Обновляем headers в начале парсинга
+      await this.updateHeaders();
+      
       const searchParams = await this.findSearchByUrl(url);
       if (!searchParams.query) {
         await this.logService.log(
@@ -1142,12 +1286,15 @@ class WildberriesParser {
   }
 
   async scrapeWbPage(page, category, userId) {
-    console.log(category);
-    // const url = `https://catalog.wb.ru/catalog/${category.shard}/catalog?appType=1&curr=rub&dest=-1257786&locale=ru&page=${page}&sort=popular&spp=0&${category.query}`;
-    const url = `https://u-search.wb.ru/exactmatch/ru/common/v18/search?ab_testing=false&ab_testing=false&appType=1&curr=rub&dest=-1257786&hide_dtype=11&inheritFilters=false&lang=ru&page=${page}&query=${category.searchQuery}&resultset=catalog&sort=popular&spp=30&suppressSpellcheck=false`;
+    const url = `https://www.wildberries.ru/__internal/u-search/exactmatch/sng/common/v18/search?ab_testing=false&appType=1&autoselectFilters=false&curr=rub&dest=494&hide_dflags=131072&hide_dtype=9%3B11&hide_vflags=4294967296&lang=ru&page=${page}&query=${category.searchQuery}&resultset=catalog&sort=popular&spp=30&suppressSpellcheck=false`;
     this.logService.log(`URL : ${url}`);
     const MAX_RETRIES = 6;
     let attempt = 0;
+
+    // Убеждаемся, что headers обновлены
+    if (!this.headers) {
+      await this.updateHeaders();
+    }
 
     while (attempt < MAX_RETRIES) {
       try {
@@ -1168,6 +1315,15 @@ class WildberriesParser {
         return { data: response.data, logMessage };
       } catch (error) {
         attempt++;
+        
+        // Обработка ошибки 498 или 403 - обновляем headers
+        if (error.response && (error.response.status === 498 || error.response.status === 403)) {
+          await this.logService.log(`Got ${error.response.status} for page ${page}, refreshing headers...`, "warning");
+          await this.updateHeaders();
+          await new Promise((resolve) => setTimeout(resolve, 3000)); // Задержка перед повтором
+          continue;
+        }
+        
         if (error.response && error.response.status === 429) {
           const retryMessage = `ℹ️ Возникла ошибка с лимитом Wildberries, отправим через ${
             this.RETRY_WAIT_TIME / 1000
@@ -1232,6 +1388,9 @@ class WildberriesParser {
     this.results = [];
 
     try {
+      // Обновляем headers в начале парсинга
+      await this.updateHeaders();
+      
       const category = await this.findCategoryByUrl(url);
       if (!category) {
         await this.logService.log(

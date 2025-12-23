@@ -14,6 +14,7 @@
     "node-telegram-bot-api": "^0.65.0",
     "nodemon": "^3.1.10",
     "p-queue": "^8.1.0",
+    "puppeteer": "^24.34.0",
     "xlsx": "^0.18.5"
   }
 }
