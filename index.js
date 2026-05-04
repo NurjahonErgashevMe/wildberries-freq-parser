@@ -16,6 +16,21 @@ app.use(express.json());
 dotenv.config();
 
 const { TELEGRAM_BOT_TOKEN, ADMIN_ID } = process.env;
+
+/**
+ * Пропускать ли запросы к __internal WB для уточнения «Количество товара».
+ * SKIP_WB_PRODUCT_COUNT в .env:
+ * - 1 / true / yes — всегда пропускать WB (все сценарии)
+ * - 0 / false / no — всегда уточнять на WB (все сценарии)
+ * - не задано — по умолчанию: excel=true (быстро), парсинг по URL=false (точнее)
+ */
+function resolveSkipWbProductCount(scenario) {
+  const v = process.env.SKIP_WB_PRODUCT_COUNT;
+  if (v === "1" || /^(true|yes)$/i.test(v || "")) return true;
+  if (v === "0" || /^(false|no)$/i.test(v || "")) return false;
+  return scenario === "excel";
+}
+
 const adminIds = ADMIN_ID.split(",").map((id) => parseInt(id.trim()));
 
 // Инициализация бота в режиме polling
@@ -151,10 +166,10 @@ class FileService {
   }
 
   normalizeProductName(name) {
-    if (!name || typeof name !== "string") return name;
-
-    const original = name;
-    const normalized = name.trim().replace(/\s+/g, " ");
+    if (name === null || name === undefined) return name;
+    // xlsx отдаёт числа/даты как number — без String() ломается .trim() downstream
+    const original = typeof name === "string" ? name : String(name);
+    const normalized = original.trim().replace(/\s+/g, " ");
 
     if (original !== normalized) {
       console.log(`Normalized product name: "${original}" -> "${normalized}"`);
@@ -422,31 +437,48 @@ class EvirmaClient {
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
       });
       
-      // Переходим на главную страницу и ждем загрузки
-      await page.goto('https://www.wildberries.ru/', { 
-        waitUntil: 'networkidle2',
-        timeout: 30000
+      // Главная + страница поиска — часть антибот-токенов появляется только после реального сценария каталога
+      await page.goto("https://www.wildberries.ru/", {
+        waitUntil: "networkidle2",
+        timeout: 45000,
       });
-      
-      // Ждем немного, чтобы браузер выполнил все скрипты
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      try {
+        await page.goto(
+          "https://www.wildberries.ru/catalog/0/search.aspx?search=" +
+            encodeURIComponent("наушники"),
+          { waitUntil: "domcontentloaded", timeout: 45000 }
+        );
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      } catch (e) {
+        await this.logService.log(
+          `WB search page warmup failed (cookies may be weaker): ${e.message}`,
+          "warning"
+        );
+      }
+
       // Получаем cookies
       const cookies = await page.cookies();
       const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
       
-      // Получаем User-Agent из браузера
+      // User-Agent реального Chromium (версия должна совпадать с sec-ch-ua, иначе WB чаще отвечает 498)
       const userAgent = await page.evaluate(() => navigator.userAgent);
-      
+      const chromeMajor =
+        (userAgent && userAgent.match(/Chrome\/(\d+)/)?.[1]) || "120";
+      const secChUa = `"Not_A Brand";v="8", "Chromium";v="${chromeMajor}", "Google Chrome";v="${chromeMajor}"`;
+
       await browser.close();
 
       // Формируем полные headers с реальными cookies
       this.wbHeaders = {
-        "User-Agent": userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent":
+          userAgent ||
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "*/*",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Accept-Encoding": "gzip, deflate, br, zstd",
-        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "sec-ch-ua": secChUa,
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "sec-fetch-dest": "empty",
@@ -544,7 +576,11 @@ class EvirmaClient {
         try {
           const evirmaResponse = await this.queryEvirmaApi(batch, userId);
           if (evirmaResponse) {
-            const batchResults = await this.parseEvirmaResponse(evirmaResponse);
+            const batchResults = await this.parseEvirmaResponse(
+              evirmaResponse,
+              userId,
+              resolveSkipWbProductCount("excel")
+            );
             results.push(...batchResults);
             success = true;
           }
@@ -617,13 +653,44 @@ class EvirmaClient {
     }
   }
 
-  async parseEvirmaResponse(evirmaData) {
+  async parseEvirmaResponse(evirmaData, userId, skipWbProductCount) {
     const parsedData = [];
     if (!evirmaData?.data?.keywords) return parsedData;
 
-    for (const [keyword, keywordData] of Object.entries(
-      evirmaData.data.keywords
-    )) {
+    const entries = Object.entries(evirmaData.data.keywords);
+    const rowCount = entries.filter(
+      ([, kd]) => kd.cluster && kd.cluster.freq_syn?.monthly
+    ).length;
+
+    let baseWbHeaders = null;
+    if (!skipWbProductCount && rowCount > 0) {
+      await this.logService.log(
+        `WB: уточнение количества по ${rowCount} ключам в этом батче (ожидайте ~${Math.ceil(
+          (rowCount * 11) / 60
+        )} мин при стабильной сети)...`
+      );
+      if (userId) {
+        await this.logService.updateLogMessage(
+          userId,
+          `📊 Уточняю количество на Wildberries: 0/${rowCount} (после Evirma)...`
+        );
+      }
+      baseWbHeaders = await this.getWbHeaders();
+      await this.logService.log(
+        `WB: cookies готовы, начинаю запросы __internal 1/${rowCount} (каждый шаг пишется в лог ниже)`
+      );
+    } else if (skipWbProductCount && rowCount > 0) {
+      await this.logService.log(
+        "Количество товара: только Evirma (WB __internal пропущен для этого сценария)",
+        "info"
+      );
+    }
+
+    let wbRequestIndex = 0;
+    let wbDone = 0;
+    let lastTelegramWbUpdate = 0;
+
+    for (const [keyword, keywordData] of entries) {
       const normalizedKeyword = this.fileService.normalizeProductName(keyword);
       // Skip if cluster is null or freq is 0
       if (
@@ -636,43 +703,93 @@ class EvirmaClient {
       // Get correct product count from Wildberries API
       let productCount = keywordData.cluster.product_count || 0;
 
-      // https://www.wildberries.ru/__internal/u-search/exactmatch/sng/common/v18/search?ab_testing=false&appType=1&curr=rub&dest=494&hide_dtype=9%3B11&hide_vflags=4294967296&inheritFilters=false&lang=ru&page=1&query=%D0%BA%D0%BB%D0%B0%D0%B2%D0%B8%D0%B0%D1%82%D1%83%D1%80%D1%8B+%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5&resultset=catalog&sort=popular&spp=30&suppressSpellcheck=false
+      // https://www.wildberries.ru/__internal/u-search/exactmatch/sng/common/v18/search?...
 
-      try {
-        const wbUrl = `https://www.wildberries.ru/__internal/u-search/exactmatch/sng/common/v18/search?ab_testing=false&appType=1&autoselectFilters=false&curr=rub&dest=494&hide_dflags=131072&hide_dtype=9%3B11&hide_vflags=4294967296&lang=ru&query=${encodeURIComponent(keywordData.cluster.keyword)}&resultset=filters&spp=30&suppressSpellcheck=false`;
-        
-        let headers = await this.getWbHeaders();
-        let retryCount = 0;
-        const MAX_RETRIES = 2;
-        
-        while (retryCount <= MAX_RETRIES) {
-          try {
-            const wbResponse = await axios.get(wbUrl, { 
-              headers,
-              timeout: 10000
-            });
-            if (wbResponse.data?.data?.total) {
-              productCount = wbResponse.data.data.total;
-            }
-            break; // Успешно получили данные
-          } catch (error) {
-            // Если ошибка 498 или 403 - обновляем headers и повторяем
-            if ((error.response?.status === 498 || error.response?.status === 403) && retryCount < MAX_RETRIES) {
-              await this.logService.log(`Got ${error.response.status} for ${keyword}, refreshing headers...`, "warning");
-              headers = await this.getWbHeaders(true); // Принудительно обновляем headers
-              retryCount++;
-              await new Promise(resolve => setTimeout(resolve, 2000)); // Небольшая задержка
-              continue;
-            }
-            // Если это не 498/403 или превышены попытки - просто логируем и используем значение по умолчанию
-            if (error.response?.status !== 498 && error.response?.status !== 403) {
-              await this.logService.log(`Failed to get WB count for ${keyword}: ${error.message}`, "warning");
-            }
-            break;
+      if (!skipWbProductCount && baseWbHeaders) {
+        try {
+          const clusterQ = keywordData.cluster.keyword;
+          const wbUrl = `https://www.wildberries.ru/__internal/u-search/exactmatch/sng/common/v18/search?ab_testing=false&appType=1&autoselectFilters=false&curr=rub&dest=494&hide_dflags=131072&hide_dtype=9%3B11&hide_vflags=4294967296&lang=ru&query=${encodeURIComponent(clusterQ)}&resultset=filters&spp=30&suppressSpellcheck=false`;
+          const searchReferer = `https://www.wildberries.ru/catalog/0/search.aspx?search=${encodeURIComponent(clusterQ)}`;
+
+          if (wbRequestIndex++ > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 1500));
           }
+
+          const stepNum = wbDone + 1;
+          const shortQ =
+            clusterQ.length > 70 ? `${clusterQ.slice(0, 67)}…` : clusterQ;
+          await this.logService.log(
+            `WB __internal ${stepNum}/${rowCount}: «${shortQ}»`
+          );
+
+          let headers = { ...baseWbHeaders, Referer: searchReferer };
+          let retryCount = 0;
+          const MAX_RETRIES = 2;
+
+          while (retryCount <= MAX_RETRIES) {
+            const controller = new AbortController();
+            const abortTimer = setTimeout(() => controller.abort(), 12000);
+            try {
+              const wbResponse = await axios.get(wbUrl, {
+                headers,
+                timeout: 12000,
+                signal: controller.signal,
+              });
+              clearTimeout(abortTimer);
+              if (wbResponse.data?.data?.total) {
+                productCount = wbResponse.data.data.total;
+              }
+              break;
+            } catch (error) {
+              clearTimeout(abortTimer);
+              if (
+                (error.response?.status === 498 ||
+                  error.response?.status === 403) &&
+                retryCount < MAX_RETRIES
+              ) {
+                await this.logService.log(
+                  `Got ${error.response.status} for ${keyword}, refreshing headers...`,
+                  "warning"
+                );
+                baseWbHeaders = await this.getWbHeaders(true);
+                headers = { ...baseWbHeaders, Referer: searchReferer };
+                retryCount++;
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+                continue;
+              }
+              if (
+                error.response?.status !== 498 &&
+                error.response?.status !== 403
+              ) {
+                await this.logService.log(
+                  `Failed to get WB count for ${keyword}: ${error.message}`,
+                  "warning"
+                );
+              }
+              break;
+            }
+          }
+
+          wbDone++;
+          const now = Date.now();
+          const telegramEveryN = 3;
+          const telegramMinMs = 4000;
+          const shouldTelegram =
+            userId &&
+            rowCount > 0 &&
+            (wbDone === rowCount ||
+              wbDone % telegramEveryN === 0 ||
+              now - lastTelegramWbUpdate >= telegramMinMs);
+          if (shouldTelegram) {
+            lastTelegramWbUpdate = now;
+            await this.logService.updateLogMessage(
+              userId,
+              `📊 Wildberries: уточнение количества ${wbDone}/${rowCount} (см. консоль — каждый запрос)`
+            );
+          }
+        } catch (error) {
+          // Игнорируем ошибки, используем значение по умолчанию
         }
-      } catch (error) {
-        // Игнорируем ошибки, используем значение по умолчанию
       }
 
       parsedData.push({
@@ -701,7 +818,7 @@ class ExcelParser {
       const data = await this.fileService.readExcelFile(filePath, userId);
       const names = data
         .map((row) => this.fileService.normalizeProductName(row["Название"]))
-        .filter((name) => name && name.trim() !== "");
+        .filter((name) => name != null && String(name).trim() !== "");
 
       if (!names || names.length === 0) {
         throw new Error("Не найдены названия товаров в колонке 'Название'");
@@ -836,9 +953,11 @@ class ExcelParser {
         { parse_mode: "Markdown" }
       );
 
-      // Возвращаемся в меню парсинга
+      // Возвращаемся в меню парсинга (метод на BotHandlers, не на ExcelParser)
       setTimeout(() => {
-        this.showParsingMenu(userId);
+        if (this.botHandlers) {
+          this.botHandlers.showParsingMenu(userId).catch((e) => console.error(e));
+        }
       }, 1000);
     } catch (error) {
       if (error.response && error.response.statusCode === 429) {
@@ -864,7 +983,9 @@ class ExcelParser {
 
       // Возвращаемся в меню парсинга даже при ошибке
       setTimeout(() => {
-        this.showParsingMenu(userId);
+        if (this.botHandlers) {
+          this.botHandlers.showParsingMenu(userId).catch((e) => console.error(e));
+        }
       }, 1000);
     } finally {
       // Очищаем состояние
@@ -1159,7 +1280,9 @@ class WildberriesParser {
           }
 
           const pageResults = await this.evirmaClient.parseEvirmaResponse(
-            evirmaResponse
+            evirmaResponse,
+            userId,
+            resolveSkipWbProductCount("search")
           );
           this.results.push(...pageResults);
         } catch (error) {
@@ -1432,7 +1555,9 @@ class WildberriesParser {
           }
 
           const pageResults = await this.evirmaClient.parseEvirmaResponse(
-            evirmaResponse
+            evirmaResponse,
+            userId,
+            resolveSkipWbProductCount("catalog")
           );
           this.results.push(...pageResults);
         } catch (error) {
